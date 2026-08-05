@@ -13,7 +13,8 @@ import (
 
 const (
 	stripeSecret   = "whsec_test_secret_value"
-	standardSecret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+	// Synthetic fixture only — not a real webhook secret.
+	standardSecret = "whsec_c2V0dGxlbWVudC10ZXN0LWhtYWMta2V5LXYx"
 )
 
 func stripeSignature(t *testing.T, secret string, ts int64, body []byte) string {

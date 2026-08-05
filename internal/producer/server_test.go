@@ -25,7 +25,8 @@ import (
 
 const (
 	testStripeSecret   = "whsec_producer_test"
-	testStandardSecret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+	// Synthetic fixture only — not a real webhook secret.
+	testStandardSecret = "whsec_c2V0dGxlbWVudC10ZXN0LWhtYWMta2V5LXYx"
 )
 
 // recordingPublisher captures what the doorman would have written to Kafka.
