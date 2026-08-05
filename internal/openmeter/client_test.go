@@ -1,0 +1,277 @@
+package openmeter
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/pymthouse/settlement/internal/config"
+)
+
+func newTestClient(t *testing.T, handler http.Handler) *Client {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	return New(config.OpenMeter{BaseURL: server.URL, APIKey: "om_test_key", Timeout: 5 * time.Second})
+}
+
+// The three completion calls are the only writes settlement makes; their paths
+// and bodies must match the Custom Invoicing contract exactly.
+func TestCompletionCallsHitTheDocumentedEndpoints(t *testing.T) {
+	var gotPath, gotAuth, gotBody string
+
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	ctx := context.Background()
+	sentAt := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+
+	t.Run("draft synchronized", func(t *testing.T) {
+		err := client.DraftSynchronized(ctx, "inv_1", DraftSynchronizedRequest{
+			Invoicing: &SyncResult{
+				ExternalID:              "in_stripe_1",
+				LineExternalIDs:         []LineExternalIDMapping{{LineID: "line_1", ExternalID: "ii_1"}},
+				LineDiscountExternalIDs: []LineDiscountIDMapping{{LineDiscountID: "disc_1", ExternalID: "ii_1"}},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := "/api/v1/apps/custom-invoicing/inv_1/draft/synchronized"; gotPath != want {
+			t.Errorf("path = %q, want %q", gotPath, want)
+		}
+		if gotAuth != "Bearer om_test_key" {
+			t.Errorf("authorization = %q", gotAuth)
+		}
+
+		var decoded map[string]any
+		if err := json.Unmarshal([]byte(gotBody), &decoded); err != nil {
+			t.Fatal(err)
+		}
+		invoicing, ok := decoded["invoicing"].(map[string]any)
+		if !ok {
+			t.Fatalf("body has no invoicing block: %s", gotBody)
+		}
+		if invoicing["externalId"] != "in_stripe_1" {
+			t.Errorf("externalId = %v", invoicing["externalId"])
+		}
+		if _, ok := invoicing["lineExternalIds"]; !ok {
+			t.Error("lineExternalIds missing; the mapping cannot be supplied later")
+		}
+		if _, ok := invoicing["lineDiscountExternalIds"]; !ok {
+			t.Error("lineDiscountExternalIds missing")
+		}
+	})
+
+	t.Run("issuing synchronized", func(t *testing.T) {
+		err := client.IssuingSynchronized(ctx, "inv_1", FinalizedRequest{
+			Invoicing: &FinalizedInvoicingRequest{InvoiceNumber: "STRIPE-1", SentToCustomerA: &sentAt},
+			Payment:   &FinalizedPaymentRequest{ExternalID: "pi_1"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := "/api/v1/apps/custom-invoicing/inv_1/issuing/synchronized"; gotPath != want {
+			t.Errorf("path = %q, want %q", gotPath, want)
+		}
+
+		var decoded struct {
+			Invoicing struct {
+				InvoiceNumber   string `json:"invoiceNumber"`
+				SentToCustomerA string `json:"sentToCustomerAt"`
+			} `json:"invoicing"`
+			Payment struct {
+				ExternalID string `json:"externalId"`
+			} `json:"payment"`
+		}
+		if err := json.Unmarshal([]byte(gotBody), &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if decoded.Invoicing.InvoiceNumber != "STRIPE-1" {
+			t.Errorf("invoiceNumber = %q", decoded.Invoicing.InvoiceNumber)
+		}
+		if decoded.Payment.ExternalID != "pi_1" {
+			t.Errorf("payment externalId = %q — the payment reference is stamped here, not at payment time", decoded.Payment.ExternalID)
+		}
+	})
+
+	t.Run("payment status", func(t *testing.T) {
+		if err := client.UpdatePaymentStatus(ctx, "inv_1", TriggerPaid); err != nil {
+			t.Fatal(err)
+		}
+		if want := "/api/v1/apps/custom-invoicing/inv_1/payment/status"; gotPath != want {
+			t.Errorf("path = %q, want %q", gotPath, want)
+		}
+		if gotBody := gotBody; gotBody != `{"trigger":"paid"}`+"\n" && gotBody != `{"trigger":"paid"}` {
+			t.Errorf("body = %q, want a bare trigger", gotBody)
+		}
+	})
+}
+
+// Omitting the invoice number lets OpenMeter generate an INV- number; an empty
+// string must not be sent, or it would fail the 1..256 character constraint.
+func TestOmittedFieldsAreNotSerialized(t *testing.T) {
+	var gotBody string
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	err := client.IssuingSynchronized(context.Background(), "inv_1", FinalizedRequest{
+		Invoicing: &FinalizedInvoicingRequest{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(gotBody), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	invoicing := decoded["invoicing"].(map[string]any)
+	if _, present := invoicing["invoiceNumber"]; present {
+		t.Errorf("an empty invoiceNumber was sent: %s", gotBody)
+	}
+	if _, present := decoded["payment"]; present {
+		t.Errorf("an empty payment block was sent: %s", gotBody)
+	}
+}
+
+func TestAPIErrorRetryability(t *testing.T) {
+	cases := map[int]bool{
+		http.StatusBadRequest:          false,
+		http.StatusUnauthorized:        false,
+		http.StatusForbidden:           false,
+		http.StatusNotFound:            false,
+		http.StatusUnprocessableEntity: false,
+		http.StatusConflict:            true, // concurrent mutation; the next try usually wins
+		http.StatusTooManyRequests:     true,
+		http.StatusRequestTimeout:      true,
+		http.StatusInternalServerError: true,
+		http.StatusBadGateway:          true,
+		http.StatusServiceUnavailable:  true,
+	}
+
+	for status, wantRetryable := range cases {
+		err := &APIError{StatusCode: status, Operation: "test"}
+		if got := err.Retryable(); got != wantRetryable {
+			t.Errorf("status %d: Retryable() = %v, want %v", status, got, wantRetryable)
+		}
+	}
+}
+
+func TestErrorHelpers(t *testing.T) {
+	notFound := &APIError{StatusCode: http.StatusNotFound}
+	conflict := &APIError{StatusCode: http.StatusConflict}
+
+	if !IsNotFound(notFound) || IsNotFound(conflict) {
+		t.Error("IsNotFound misclassified an error")
+	}
+	if !IsConflict(conflict) || IsConflict(notFound) {
+		t.Error("IsConflict misclassified an error")
+	}
+	if IsNotFound(nil) || IsConflict(nil) {
+		t.Error("nil should not classify as an API error")
+	}
+}
+
+func TestGetInvoiceDecodesTheLifecycleFields(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("expand") != "lines" {
+			t.Errorf("lines were not expanded: %s", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"inv_1","currency":"USD","status":"draft","number":"INV-1",
+			"statusDetails":{"immutable":false,"failed":false,"extendedStatus":"draft.sync",
+				"availableActions":{"approve":{"resultingState":"payment_processing.pending"},
+				                    "delete":{"resultingState":"deleted"}}},
+			"customer":{"id":"cus_1","key":"owner-42"},
+			"totals":{"total":"42.50"},
+			"externalIds":{"invoicing":"in_stripe_1","payment":"pi_1"},
+			"lines":[{"id":"line_1","totals":{"total":"30.00"},
+				"children":[{"id":"line_1_child","totals":{"total":"30.00"}}],
+				"discounts":{"amount":[{"id":"disc_1","amount":"5.00"}]}}]
+		}`)
+	}))
+
+	invoice, err := client.GetInvoice(context.Background(), "inv_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if invoice.StatusDetails.ExtendedStatus != "draft.sync" {
+		t.Errorf("extendedStatus = %q", invoice.StatusDetails.ExtendedStatus)
+	}
+	if invoice.StatusDetails.AvailableActions.Approve == nil ||
+		invoice.StatusDetails.AvailableActions.Approve.ResultingState != "payment_processing.pending" {
+		t.Error("availableActions.approve was not decoded")
+	}
+	if invoice.ExternalIDs.Invoicing != "in_stripe_1" {
+		t.Errorf("external invoicing id = %q", invoice.ExternalIDs.Invoicing)
+	}
+	if len(invoice.Lines) != 1 || len(invoice.Lines[0].Children) != 1 {
+		t.Fatalf("lines were not decoded: %+v", invoice.Lines)
+	}
+	if got := invoice.Lines[0].LineDiscountIDs(); len(got) != 1 || got[0] != "disc_1" {
+		t.Errorf("discount ids = %v", got)
+	}
+	if got := invoice.Lines[0].ChildIDs(); len(got) != 1 || got[0] != "line_1_child" {
+		t.Errorf("child ids = %v", got)
+	}
+	if got := len(invoice.AllLines()); got != 2 {
+		t.Errorf("AllLines returned %d lines, want parent and child", got)
+	}
+}
+
+func TestNeedsAttention(t *testing.T) {
+	cases := []struct {
+		name string
+		inv  Invoice
+		want bool
+	}{
+		{"healthy draft", Invoice{Status: StatusDraft}, false},
+		{"paid", Invoice{Status: StatusPaid}, false},
+		{"failed sync", Invoice{Status: StatusIssuing, StatusDetails: StatusDetails{Failed: true}}, true},
+		{"overdue", Invoice{Status: StatusOverdue}, true},
+		{"uncollectible", Invoice{Status: StatusUncollectible}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.inv.NeedsAttention(); got != tc.want {
+				t.Errorf("NeedsAttention() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBillableLinesSkipsDeletedLines(t *testing.T) {
+	invoice := Invoice{Lines: []Line{
+		{ID: "keep"},
+		{ID: "gone", Status: "deleted"},
+	}}
+	billable := invoice.BillableLines()
+	if len(billable) != 1 || billable[0].ID != "keep" {
+		t.Fatalf("BillableLines = %+v, want only the live line", billable)
+	}
+}
+
+func TestNormalizedTypeStripsThePrefix(t *testing.T) {
+	if got := (Notification{Type: "invoicing.invoice.updated"}).NormalizedType(); got != EventInvoiceUpdated {
+		t.Errorf("NormalizedType = %q, want %q", got, EventInvoiceUpdated)
+	}
+	if got := (Notification{Type: "invoice.created"}).NormalizedType(); got != EventInvoiceCreated {
+		t.Errorf("NormalizedType = %q", got)
+	}
+}

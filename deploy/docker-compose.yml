@@ -1,0 +1,122 @@
+# Local settlement stack: Redpanda (Kafka), Redis, the doorman and the worker.
+#
+# This brings up the billing lane only. OpenMeter and Stripe are external —
+# point SETTLEMENT_OPENMETER_URL at a running OpenMeter (pymthouse's
+# docker-compose.openmeter.yml exposes one on 127.0.0.1:48888) and use
+# `stripe listen --forward-to localhost:8080/webhooks/stripe` for Stripe.
+#
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#   docker compose -f deploy/docker-compose.yml run --rm settlementctl topics ensure --partitions 3
+#
+# The billing topics live on their own broker here, mirroring the production
+# split from OpenMeter's usage-ingest cluster: a usage spike must never delay
+# an invoice, and a billing incident must never stall metering.
+
+name: settlement
+
+x-settlement-image: &settlement-image
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+
+x-kafka-env: &kafka-env
+  SETTLEMENT_KAFKA_BROKERS: redpanda:9092
+  SETTLEMENT_KAFKA_TOPIC_STRIPE: billing.stripe.events.v1
+  SETTLEMENT_KAFKA_TOPIC_OPENMETER: billing.openmeter.invoices.v1
+  SETTLEMENT_KAFKA_TOPIC_DLQ: billing.settlement.dlq.v1
+  # A single-broker dev cluster cannot satisfy acks=all with replication.
+  SETTLEMENT_KAFKA_REQUIRED_ACKS: "1"
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.4
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+      - --check=false
+    ports:
+      - "127.0.0.1:19092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    # noeviction matters: silently dropping a dedupe claim under memory
+    # pressure would let a redelivered event charge a customer twice.
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  producer:
+    <<: *settlement-image
+    command: ["producer"]
+    environment:
+      <<: *kafka-env
+      SETTLEMENT_HTTP_ADDR: ":8080"
+      SETTLEMENT_LOG_LEVEL: ${SETTLEMENT_LOG_LEVEL:-info}
+      SETTLEMENT_STRIPE_WEBHOOK_SECRETS: ${SETTLEMENT_STRIPE_WEBHOOK_SECRETS:?set this to your Stripe endpoint secret}
+      SETTLEMENT_OPENMETER_WEBHOOK_SECRETS: ${SETTLEMENT_OPENMETER_WEBHOOK_SECRETS:-}
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  worker:
+    <<: *settlement-image
+    command: ["worker"]
+    environment:
+      <<: *kafka-env
+      SETTLEMENT_KAFKA_CONSUMER_GROUP: settlement-worker
+      SETTLEMENT_METRICS_ADDR: ":8081"
+      SETTLEMENT_LOG_LEVEL: ${SETTLEMENT_LOG_LEVEL:-info}
+      SETTLEMENT_REDIS_URL: redis://redis:6379/0
+      # host.docker.internal reaches an OpenMeter running on the host.
+      SETTLEMENT_OPENMETER_URL: ${SETTLEMENT_OPENMETER_URL:-http://host.docker.internal:48888}
+      SETTLEMENT_OPENMETER_API_KEY: ${SETTLEMENT_OPENMETER_API_KEY:-}
+      SETTLEMENT_STRIPE_SECRET_KEY: ${SETTLEMENT_STRIPE_SECRET_KEY:?set this to your Stripe secret key}
+      SETTLEMENT_STRIPE_CHARGE_MODEL: ${SETTLEMENT_STRIPE_CHARGE_MODEL:-platform}
+      SETTLEMENT_APPLICATION_FEE_BPS: ${SETTLEMENT_APPLICATION_FEE_BPS:-0}
+      SETTLEMENT_START_OFFSET: ${SETTLEMENT_START_OFFSET:-first}
+    ports:
+      - "127.0.0.1:8081:8081"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8081/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Run on demand: `docker compose run --rm settlementctl topics ensure`.
+  settlementctl:
+    <<: *settlement-image
+    entrypoint: ["/usr/local/bin/settlementctl"]
+    environment:
+      <<: *kafka-env
+      SETTLEMENT_STRIPE_WEBHOOK_SECRETS: placeholder
+    profiles: ["tools"]
+    depends_on:
+      redpanda:
+        condition: service_healthy
