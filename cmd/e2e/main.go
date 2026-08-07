@@ -17,6 +17,9 @@ import (
 	"github.com/pymthouse/settlement/internal/openmeter"
 )
 
+// healthPath is the liveness endpoint every settlement service exposes.
+const healthPath = "/healthz"
+
 func main() {
 	os.Exit(run())
 }
@@ -32,15 +35,15 @@ func run() int {
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	if err := healthCheck(ctx, client, cfg.ProducerURL, "/healthz"); err != nil {
+	if err := healthCheck(ctx, client, cfg.ProducerURL, healthPath); err != nil {
 		log.Printf("producer health: %v", err)
 		return 1
 	}
-	if err := healthCheck(ctx, client, cfg.WorkerURL, "/healthz"); err != nil {
+	if err := healthCheck(ctx, client, cfg.WorkerURL, healthPath); err != nil {
 		log.Printf("worker health: %v", err)
 		return 1
 	}
-	if err := healthCheck(ctx, client, cfg.StripefakeURL, "/healthz"); err != nil {
+	if err := healthCheck(ctx, client, cfg.StripefakeURL, healthPath); err != nil {
 		log.Printf("stripefake health: %v", err)
 		return 1
 	}

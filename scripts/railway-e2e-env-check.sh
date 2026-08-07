@@ -7,6 +7,9 @@ case "${railway_env,,}" in
     echo "refusing to touch production Railway from the e2e environment check" >&2
     exit 1
     ;;
+  *)
+    # Any other environment (including unset) is a non-production target.
+    ;;
 esac
 
 stripe_base=${SETTLEMENT_STRIPE_API_BASE:-}

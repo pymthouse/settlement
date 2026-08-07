@@ -26,6 +26,12 @@ const (
 	metaInvoiceID  = "openmeter_invoice_id"
 )
 
+// Request headers the real Stripe API defines and this fake honours.
+const (
+	headerStripeAccount  = "Stripe-Account"
+	headerIdempotencyKey = "Idempotency-Key"
+)
+
 // Config controls the fake Stripe server.
 type Config struct {
 	WebhookURL    string
@@ -264,8 +270,8 @@ func (s *Server) record(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.requests[r.Method+" "+r.URL.Path]++
-		s.accountHeaders = append(s.accountHeaders, r.Header.Get("Stripe-Account"))
-		if key := r.Header.Get("Idempotency-Key"); key != "" {
+		s.accountHeaders = append(s.accountHeaders, r.Header.Get(headerStripeAccount))
+		if key := r.Header.Get(headerIdempotencyKey); key != "" {
 			s.idempotencyKeys = append(s.idempotencyKeys, key)
 		}
 		remaining := s.failNext[r.URL.Path]
@@ -301,7 +307,7 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) createCustomer(w http.ResponseWriter, r *http.Request) {
 	form := parseForm(r)
-	key := r.Header.Get("Idempotency-Key")
+	key := r.Header.Get(headerIdempotencyKey)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -352,7 +358,7 @@ func (s *Server) searchCustomers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createInvoice(w http.ResponseWriter, r *http.Request) {
 	form := parseForm(r)
-	key := r.Header.Get("Idempotency-Key")
+	key := r.Header.Get(headerIdempotencyKey)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -373,7 +379,7 @@ func (s *Server) createInvoice(w http.ResponseWriter, r *http.Request) {
 	}
 	s.invoices[invoice.ID] = invoice
 	s.invoiceOrder = append(s.invoiceOrder, invoice.ID)
-	if account := r.Header.Get("Stripe-Account"); account != "" {
+	if account := r.Header.Get(headerStripeAccount); account != "" {
 		s.invoiceAccounts[invoice.ID] = account
 	}
 	if key != "" {
@@ -441,7 +447,7 @@ func (s *Server) finalizeInvoice(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "invoice")
 		return
 	}
-	if account := r.Header.Get("Stripe-Account"); account != "" {
+	if account := r.Header.Get(headerStripeAccount); account != "" {
 		s.invoiceAccounts[invoice.ID] = account
 	}
 	if invoice.Status != "draft" {
@@ -513,7 +519,7 @@ func (s *Server) voidInvoice(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createInvoiceItem(w http.ResponseWriter, r *http.Request) {
 	form := parseForm(r)
-	key := r.Header.Get("Idempotency-Key")
+	key := r.Header.Get(headerIdempotencyKey)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
