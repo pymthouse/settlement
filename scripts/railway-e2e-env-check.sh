@@ -36,8 +36,7 @@ for name in "${required[@]}"; do
 done
 
 if (( ${#missing[@]} > 0 )); then
-  printf 'missing required env vars: %s
-' "${missing[*]}" >&2
+  printf 'missing required env vars: %s\n' "${missing[*]}" >&2
   exit 1
 fi
 
