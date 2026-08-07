@@ -1,8 +1,8 @@
 # Multi-stage build for the settlement binaries.
 #
-# One image ships all three commands; the entrypoint selects which to run, so
-# the producer, the worker and settlementctl can never drift to different
-# versions of the same event contract.
+# One image ships every command; the entrypoint selects which to run, so the
+# producer, the worker, settlementctl and the test-mode e2e pair can never
+# drift to different versions of the same event contract.
 #
 #   docker build -f deploy/Dockerfile -t pymthouse/settlement .
 #   docker run --rm pymthouse/settlement worker
@@ -30,7 +30,13 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
       -o /out/worker ./cmd/worker && \
     CGO_ENABLED=0 GOOS=linux go build -trimpath \
       -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
-      -o /out/settlementctl ./cmd/settlementctl
+      -o /out/settlementctl ./cmd/settlementctl && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath \
+      -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
+      -o /out/stripefake ./cmd/stripefake && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath \
+      -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
+      -o /out/e2e ./cmd/e2e
 
 FROM alpine:3.22
 
@@ -42,6 +48,8 @@ RUN apk add --no-cache ca-certificates tzdata wget && \
 COPY --from=build /out/producer /usr/local/bin/producer
 COPY --from=build /out/worker /usr/local/bin/worker
 COPY --from=build /out/settlementctl /usr/local/bin/settlementctl
+COPY --from=build /out/stripefake /usr/local/bin/stripefake
+COPY --from=build /out/e2e /usr/local/bin/e2e
 
 USER settlement
 

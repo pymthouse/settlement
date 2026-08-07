@@ -17,351 +17,82 @@ import (
 	"github.com/pymthouse/settlement/internal/config"
 	"github.com/pymthouse/settlement/internal/openmeter"
 	"github.com/pymthouse/settlement/internal/stripe"
+	"github.com/pymthouse/settlement/internal/stripefake"
 )
 
-// fakeStripe is an in-memory stand-in for the Stripe API.
-//
-// It keeps enough state to catch the mistakes that matter: duplicate invoice
-// items on a retry, an invoice total that does not match its items, a missing
-// Stripe-Account header on a direct charge, an application fee applied after
-// finalization.
+// fakeStripe is a thin test wrapper around internal/stripefake.
 type fakeStripe struct {
-	mu sync.Mutex
-
 	server *httptest.Server
-
-	customers map[string]*stripe.Customer
-	invoices  map[string]*stripe.Invoice
-	items     map[string]*stripe.InvoiceItem
-
-	// accountHeaders records the Stripe-Account header seen per request path.
-	accountHeaders []string
-	// idempotencyKeys records keys, so a test can assert a retry reused one.
-	idempotencyKeys []string
-	// requests counts calls by "METHOD /path".
-	requests map[string]int
-
-	// failNext, when set, makes the next matching request fail.
-	failNext map[string]int
-	nextID   int
+	inner  *stripefake.Server
 }
 
 func newFakeStripe(t *testing.T) *fakeStripe {
 	t.Helper()
 
-	f := &fakeStripe{
-		customers: map[string]*stripe.Customer{},
-		invoices:  map[string]*stripe.Invoice{},
-		items:     map[string]*stripe.InvoiceItem{},
-		requests:  map[string]int{},
-		failNext:  map[string]int{},
+	inner := stripefake.New(stripefake.Config{})
+	server := httptest.NewServer(inner.Handler())
+	t.Cleanup(server.Close)
+	return &fakeStripe{
+		server: server,
+		inner:  inner,
 	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/customers", f.createCustomer)
-	mux.HandleFunc("GET /v1/customers/search", f.searchCustomers)
-	mux.HandleFunc("GET /v1/customers/{id}", f.getCustomer)
-	mux.HandleFunc("POST /v1/invoices", f.createInvoice)
-	mux.HandleFunc("GET /v1/invoices/search", f.searchInvoices)
-	mux.HandleFunc("GET /v1/invoices/{id}", f.getInvoice)
-	mux.HandleFunc("POST /v1/invoices/{id}", f.updateInvoice)
-	mux.HandleFunc("POST /v1/invoices/{id}/finalize_invoice", f.finalizeInvoice)
-	mux.HandleFunc("POST /v1/invoices/{id}/void", f.voidInvoice)
-	mux.HandleFunc("POST /v1/invoiceitems", f.createInvoiceItem)
-	mux.HandleFunc("GET /v1/invoiceitems", f.listInvoiceItems)
-	mux.HandleFunc("DELETE /v1/invoiceitems/{id}", f.deleteInvoiceItem)
-
-	f.server = httptest.NewServer(f.record(mux))
-	t.Cleanup(f.server.Close)
-	return f
 }
 
-// record captures cross-cutting request facts before dispatching.
-func (f *fakeStripe) record(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		f.mu.Lock()
-		f.requests[r.Method+" "+r.URL.Path]++
-		f.accountHeaders = append(f.accountHeaders, r.Header.Get("Stripe-Account"))
-		if key := r.Header.Get("Idempotency-Key"); key != "" {
-			f.idempotencyKeys = append(f.idempotencyKeys, key)
-		}
-		remaining := f.failNext[r.URL.Path]
-		if remaining > 0 {
-			f.failNext[r.URL.Path] = remaining - 1
-		}
-		f.mu.Unlock()
-
-		if remaining > 0 {
-			w.Header().Set("Request-Id", "req_fail")
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = io.WriteString(w, `{"error":{"type":"api_error","message":"simulated outage"}}`)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+func (f *fakeStripe) URL() string {
+	return f.server.URL
 }
 
-func (f *fakeStripe) id(prefix string) string {
-	f.nextID++
-	return fmt.Sprintf("%s_%d", prefix, f.nextID)
+func (f *fakeStripe) FailNext(path string, count int) {
+	f.inner.FailNext(path, count)
 }
 
-func (f *fakeStripe) createCustomer(w http.ResponseWriter, r *http.Request) {
-	form := parseForm(r)
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	customer := &stripe.Customer{
-		ID:       f.id("cus"),
-		Name:     form.Get("name"),
-		Metadata: metadataFrom(form),
-	}
-	f.customers[customer.ID] = customer
-	writeJSON(w, customer)
+func (f *fakeStripe) SetInvoiceStatus(id, status string) {
+	f.inner.SetInvoiceStatus(id, status)
 }
 
-func (f *fakeStripe) getCustomer(w http.ResponseWriter, r *http.Request) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	customer, ok := f.customers[r.PathValue("id")]
-	if !ok {
-		notFound(w, "customer")
-		return
-	}
-	writeJSON(w, customer)
+func (f *fakeStripe) ItemsFor(invoiceID string) []stripe.InvoiceItem {
+	return f.inner.ItemsFor(invoiceID)
 }
 
-func (f *fakeStripe) searchCustomers(w http.ResponseWriter, r *http.Request) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	wanted := searchValue(r.URL.Query().Get("query"))
-	data := []*stripe.Customer{}
-	for _, customer := range f.customers {
-		if customer.Metadata[MetaCustomerID] == wanted {
-			data = append(data, customer)
-		}
+func (f *fakeStripe) OnlyInvoice(t *testing.T) *stripe.Invoice {
+	t.Helper()
+	invoice := f.inner.OnlyInvoice()
+	if invoice == nil {
+		t.Fatal("expected exactly one Stripe invoice")
 	}
-	writeJSON(w, map[string]any{"data": data})
+	return invoice
 }
 
-func (f *fakeStripe) createInvoice(w http.ResponseWriter, r *http.Request) {
-	form := parseForm(r)
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	invoice := &stripe.Invoice{
-		ID:               f.id("in"),
-		Status:           "draft",
-		Currency:         form.Get("currency"),
-		Customer:         form.Get("customer"),
-		Metadata:         metadataFrom(form),
-		CollectionMethod: form.Get("collection_method"),
-	}
-	f.invoices[invoice.ID] = invoice
-	writeJSON(w, invoice)
+func (f *fakeStripe) CallCount(method, path string) int {
+	return f.inner.CallCount(method, path)
 }
 
-func (f *fakeStripe) getInvoice(w http.ResponseWriter, r *http.Request) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	invoice, ok := f.invoices[r.PathValue("id")]
-	if !ok {
-		notFound(w, "invoice")
-		return
-	}
-	f.retotalLocked(invoice)
-	writeJSON(w, invoice)
+func (f *fakeStripe) AccountsSeen() map[string]bool {
+	return f.inner.AccountsSeen()
 }
 
-func (f *fakeStripe) updateInvoice(w http.ResponseWriter, r *http.Request) {
-	form := parseForm(r)
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	invoice, ok := f.invoices[r.PathValue("id")]
-	if !ok {
-		notFound(w, "invoice")
-		return
-	}
-	if fee := form.Get("application_fee_amount"); fee != "" {
-		if invoice.Status != "draft" {
-			// Stripe rejects fee changes after finalization; so must the fake,
-			// or the test would not catch us doing it in the wrong order.
-			badRequest(w, "application_fee_amount cannot be updated on a finalized invoice")
-			return
-		}
-		parsed, _ := strconv.ParseInt(fee, 10, 64)
-		invoice.ApplicationFee = parsed
-	}
-	f.retotalLocked(invoice)
-	writeJSON(w, invoice)
+func (f *fakeStripe) Snapshot() stripefake.Snapshot {
+	return f.inner.Snapshot()
 }
 
-func (f *fakeStripe) finalizeInvoice(w http.ResponseWriter, r *http.Request) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	invoice, ok := f.invoices[r.PathValue("id")]
-	if !ok {
-		notFound(w, "invoice")
-		return
-	}
-	if invoice.Status == "draft" {
-		invoice.Status = "open"
-		invoice.Number = "STRIPE-" + strings.ToUpper(invoice.ID)
-		pi := f.id("pi")
-		invoice.Payments = &stripe.InvoicePaymentList{
-			Data: []stripe.InvoicePayment{{
-				ID:        f.id("inpay"),
-				IsDefault: true,
-				Status:    "open",
-				Payment: stripe.InvoicePaymentRef{
-					Type:          "payment_intent",
-					PaymentIntent: json.RawMessage(`"` + pi + `"`),
-				},
-			}},
-		}
-	}
-	f.retotalLocked(invoice)
-	writeJSON(w, invoice)
+func (f *fakeStripe) Inspect() stripefake.Snapshot {
+	return f.inner.Inspect()
 }
 
-func (f *fakeStripe) voidInvoice(w http.ResponseWriter, r *http.Request) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	invoice, ok := f.invoices[r.PathValue("id")]
-	if !ok {
-		notFound(w, "invoice")
-		return
-	}
-	invoice.Status = "void"
-	writeJSON(w, invoice)
-}
-
-func (f *fakeStripe) searchInvoices(w http.ResponseWriter, r *http.Request) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	wanted := searchValue(r.URL.Query().Get("query"))
-	data := []*stripe.Invoice{}
-	for _, invoice := range f.invoices {
-		if invoice.Metadata[MetaInvoiceID] == wanted {
-			f.retotalLocked(invoice)
-			data = append(data, invoice)
-		}
-	}
-	writeJSON(w, map[string]any{"data": data})
-}
-
-func (f *fakeStripe) createInvoiceItem(w http.ResponseWriter, r *http.Request) {
-	form := parseForm(r)
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	amount, _ := strconv.ParseInt(form.Get("amount"), 10, 64)
-	item := &stripe.InvoiceItem{
-		ID:          f.id("ii"),
-		Amount:      amount,
-		Currency:    form.Get("currency"),
-		Description: form.Get("description"),
-		Invoice:     form.Get("invoice"),
-		Metadata:    metadataFrom(form),
-	}
-	f.items[item.ID] = item
-	writeJSON(w, item)
-}
-
-func (f *fakeStripe) listInvoiceItems(w http.ResponseWriter, r *http.Request) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	invoiceID := r.URL.Query().Get("invoice")
-	data := []*stripe.InvoiceItem{}
-	for _, item := range f.items {
-		if item.Invoice == invoiceID {
-			data = append(data, item)
-		}
-	}
-	writeJSON(w, map[string]any{"data": data, "has_more": false})
-}
-
-func (f *fakeStripe) deleteInvoiceItem(w http.ResponseWriter, r *http.Request) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	id := r.PathValue("id")
-	if _, ok := f.items[id]; !ok {
-		notFound(w, "invoiceitem")
-		return
-	}
-	delete(f.items, id)
-	writeJSON(w, map[string]any{"id": id, "deleted": true})
-}
-
-// retotalLocked keeps an invoice's total equal to the sum of its items, the
-// way Stripe does.
-func (f *fakeStripe) retotalLocked(invoice *stripe.Invoice) {
-	var total int64
-	for _, item := range f.items {
-		if item.Invoice == invoice.ID {
-			total += item.Amount
-		}
-	}
-	invoice.Total = total
-	invoice.AmountDue = total
-}
-
-// itemsFor returns the items attached to an invoice, for assertions.
 func (f *fakeStripe) itemsFor(invoiceID string) []stripe.InvoiceItem {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	var out []stripe.InvoiceItem
-	for _, item := range f.items {
-		if item.Invoice == invoiceID {
-			out = append(out, *item)
-		}
-	}
-	return out
+	return f.ItemsFor(invoiceID)
 }
 
 func (f *fakeStripe) onlyInvoice(t *testing.T) *stripe.Invoice {
-	t.Helper()
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if len(f.invoices) != 1 {
-		t.Fatalf("expected exactly one Stripe invoice, found %d", len(f.invoices))
-	}
-	for _, invoice := range f.invoices {
-		return invoice
-	}
-	return nil
+	return f.OnlyInvoice(t)
 }
 
 func (f *fakeStripe) callCount(method, path string) int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.requests[method+" "+path]
+	return f.CallCount(method, path)
 }
 
 func (f *fakeStripe) accountsSeen() map[string]bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	seen := map[string]bool{}
-	for _, account := range f.accountHeaders {
-		seen[account] = true
-	}
-	return seen
+	return f.AccountsSeen()
 }
 
 // fakeOpenMeter is an in-memory stand-in for the OpenMeter billing API.
@@ -538,7 +269,7 @@ func newTestSettler(t *testing.T, om *fakeOpenMeter, sc *fakeStripe, mutate func
 	t.Helper()
 
 	stripeCfg := config.Stripe{
-		APIBase:                   sc.server.URL,
+		APIBase:                   sc.URL(),
 		SecretKey:                 "sk_test_fake",
 		Timeout:                   5 * time.Second,
 		MaxRetries:                2,

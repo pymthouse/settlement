@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -48,6 +49,46 @@ jobs:
           go build ./cmd/producer
           go build ./cmd/worker
           go build ./cmd/settlementctl
+          go build ./cmd/stripefake
+          go build ./cmd/e2e
+
+  e2e-konnect:
+    name: Test-mode Konnect e2e
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'workflow_dispatch' || vars.SETTLEMENT_E2E == 'true'
+    env:
+      SETTLEMENT_OPENMETER_URL: ${{ vars.SETTLEMENT_OPENMETER_URL }}
+      SETTLEMENT_OPENMETER_API_KEY: ${{ secrets.SETTLEMENT_OPENMETER_API_KEY }}
+      SETTLEMENT_E2E_BILLING_PROFILE_ID: ${{ secrets.SETTLEMENT_E2E_BILLING_PROFILE_ID }}
+      SETTLEMENT_E2E_PRODUCER_URL: ${{ vars.SETTLEMENT_E2E_PRODUCER_URL }}
+      SETTLEMENT_E2E_WORKER_URL: ${{ vars.SETTLEMENT_E2E_WORKER_URL }}
+      SETTLEMENT_E2E_STRIPEFAKE_URL: ${{ vars.SETTLEMENT_E2E_STRIPEFAKE_URL }}
+      SETTLEMENT_E2E_CONNECT_ACCOUNT_ID: ${{ vars.SETTLEMENT_E2E_CONNECT_ACCOUNT_ID }}
+      SETTLEMENT_STRIPE_API_BASE: ${{ vars.SETTLEMENT_STRIPE_API_BASE }}
+      SETTLEMENT_STRIPE_SECRET_KEY: ${{ secrets.SETTLEMENT_STRIPE_SECRET_KEY }}
+      SETTLEMENT_STRIPE_WEBHOOK_SECRETS: ${{ secrets.SETTLEMENT_STRIPE_WEBHOOK_SECRETS }}
+      SETTLEMENT_RAILWAY_ENVIRONMENT: ${{ vars.SETTLEMENT_RAILWAY_ENVIRONMENT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Build e2e binaries
+        run: |
+          go build ./cmd/producer
+          go build ./cmd/worker
+          go build ./cmd/stripefake
+          go build ./cmd/e2e
+
+      - name: Refuse unsafe Railway / Stripe settings
+        run: scripts/railway-e2e-env-check.sh
+
+      - name: Run Konnect e2e
+        run: ./e2e
 
   image:
     name: Build container image

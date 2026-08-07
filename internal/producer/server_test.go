@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	testStripeSecret   = "whsec_producer_test"
+	testStripeSecret = "whsec_producer_test"
 	// Synthetic fixture only — not a real webhook secret.
 	testStandardSecret = "whsec_c2V0dGxlbWVudC10ZXN0LWhtYWMta2V5LXYx"
 )

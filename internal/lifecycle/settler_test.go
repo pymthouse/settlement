@@ -593,7 +593,7 @@ func TestTransientStripeFailureStaysRetryable(t *testing.T) {
 	om.putCustomerMetadata("cus_om_1", openmeter.Metadata{})
 
 	// Exhaust the client's own short retry budget so the error surfaces.
-	sc.failNext["/v1/customers"] = 10
+	sc.FailNext("/v1/customers", 10)
 
 	settler := newTestSettler(t, om, sc, nil)
 	_, err := settler.HandleOpenMeterNotification(context.Background(),
@@ -623,9 +623,7 @@ func TestPaymentPendingReconcilesFromStripeState(t *testing.T) {
 
 	// Stripe collected the money but its webhook was lost.
 	stripeInvoice := sc.onlyInvoice(t)
-	sc.mu.Lock()
-	sc.invoices[stripeInvoice.ID].Status = "paid"
-	sc.mu.Unlock()
+	sc.SetInvoiceStatus(stripeInvoice.ID, "paid")
 
 	invoice.Status = openmeter.StatusPaymentProcessing
 	invoice.StatusDetails.ExtendedStatus = "payment_processing.pending"

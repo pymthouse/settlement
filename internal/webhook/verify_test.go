@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	stripeSecret   = "whsec_test_secret_value"
+	stripeSecret = "whsec_test_secret_value"
 	// Synthetic fixture only — not a real webhook secret.
 	standardSecret = "whsec_c2V0dGxlbWVudC10ZXN0LWhtYWMta2V5LXYx"
 )

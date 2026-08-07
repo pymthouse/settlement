@@ -207,6 +207,8 @@ cmd/
   producer/          the doorman
   worker/            the settlement worker
   settlementctl/     operator CLI: topics, replay, DLQ redrive, inspect
+  stripefake/        test-mode Stripe emulator and webhook pusher
+  e2e/               Konnect + fake Stripe e2e driver
 internal/
   config/            environment configuration and validation
   webhook/           raw-body signature verification (Stripe, Standard Webhooks)
@@ -217,12 +219,13 @@ internal/
   lifecycle/         the three sync handlers — the domain logic
   openmeter/         OpenMeter + Custom Invoicing client (pinned to beta.228)
   stripe/            focused Stripe REST client
+  stripefake/        in-memory Stripe emulator used by tests and e2e
   money/             exact decimal → minor-unit conversion
   dedupe/            idempotency store (Redis or in-process)
   faults/            permanent vs retryable classification
   metrics/           Prometheus instruments
-deploy/              Dockerfile and local compose stack
-docs/                architecture, OpenMeter contract, operations runbook
+deploy/              Dockerfile and local + e2e compose stacks
+docs/                architecture, OpenMeter contract, operations runbook, e2e runbook
 ```
 
 ---
@@ -258,7 +261,7 @@ Point an OpenMeter notification channel at
 ### Build and test locally
 
 ```bash
-make build     # bin/producer, bin/worker, bin/settlementctl
+make build     # bin/producer, bin/worker, bin/settlementctl, bin/stripefake, bin/e2e
 make test      # unit and integration tests
 make check     # what CI runs: vet, gofmt, go mod tidy, tests under -race
 ```
@@ -449,7 +452,6 @@ the rest are the deployment and integration work around it.
 - [x] `issuing.sync`: application fee, finalize, call invoicing synchronized
 - [x] `payment_processing.pending`: trigger from the Stripe webhook, or from
       Stripe's own state when the webhook was lost
-
 ### Phase 4 — Connect and monetization
 
 - [x] Charge-model resolution: platform, direct, destination
@@ -466,8 +468,8 @@ the rest are the deployment and integration work around it.
 - [x] Immutability respected — corrections go on the invoice, never upstream
 - [ ] Wire the alert rules into the Prometheus stack
 - [ ] Load-test an invoice burst and confirm per-customer ordering holds
-- [ ] Run a full test-mode settlement end to end and add it to the automated
-      suite
+- [x] Run a full test-mode settlement end to end and add it to the automated
+      suite (Konnect + fake Stripe e2e)
 
 ---
 
@@ -476,6 +478,8 @@ the rest are the deployment and integration work around it.
 - [docs/architecture.md](docs/architecture.md) — component and data-flow detail
 - [docs/openmeter-custom-invoicing.md](docs/openmeter-custom-invoicing.md) — the
   pinned API contract and where it differs from the summary docs
+- [docs/e2e-konnect-fake-stripe.md](docs/e2e-konnect-fake-stripe.md) — the
+  Railway e2e environment and fake Stripe driver runbook
 - [docs/operations.md](docs/operations.md) — runbook: deploying, replaying,
   redriving, and what each failure reason means
 

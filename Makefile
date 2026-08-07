@@ -12,11 +12,13 @@ help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 .PHONY: build
-build: ## Build all three binaries into bin/
+build: ## Build all service binaries into bin/
 	@mkdir -p bin
 	$(GO) build -trimpath -ldflags="$(LDFLAGS)" -o bin/producer ./cmd/producer
 	$(GO) build -trimpath -ldflags="$(LDFLAGS)" -o bin/worker ./cmd/worker
 	$(GO) build -trimpath -ldflags="$(LDFLAGS)" -o bin/settlementctl ./cmd/settlementctl
+	$(GO) build -trimpath -ldflags="$(LDFLAGS)" -o bin/stripefake ./cmd/stripefake
+	$(GO) build -trimpath -ldflags="$(LDFLAGS)" -o bin/e2e ./cmd/e2e
 
 .PHONY: test
 test: ## Run the test suite
