@@ -267,6 +267,67 @@ func TestBillableLinesSkipsDeletedLines(t *testing.T) {
 	}
 }
 
+func TestIsKonnectURL(t *testing.T) {
+	cases := map[string]bool{
+		"https://us.api.konghq.com/v3/openmeter": true,
+		"https://eu.api.konghq.com/v3/openmeter": true,
+		"https://localhost:8080":                  false,
+		"http://openmeter:8888":                   false,
+		"https://billing.konnect.example.com":     true,
+	}
+	for url, want := range cases {
+		if got := isKonnectURL(url); got != want {
+			t.Errorf("isKonnectURL(%q) = %v, want %v", url, got, want)
+		}
+	}
+}
+
+func TestKonnectRewritePath(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"/api/v1/billing/invoices/inv_1?expand=lines", "/billing/invoices/inv_1?expand=lines"},
+		{"/api/v1/apps/custom-invoicing/inv_1/draft/synchronized", "/apps/custom-invoicing/inv_1/draft/synchronized"},
+		{"/api/v1/customers/cust_1", "/customers/cust_1"},
+		{"/api/v2/customers/cust_1/entitlements", "/customers/cust_1/entitlements"},
+		{"/billing/invoices/inv_1", "/billing/invoices/inv_1"},
+	}
+	for _, tc := range cases {
+		if got := konnectRewritePath(tc.in); got != tc.want {
+			t.Errorf("konnectRewritePath(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestKonnectClientRewritesPaths(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"id":"inv_1","status":"draft","currency":"USD",
+			"customer":{"id":"c1"},"totals":{"total":"0"},
+			"statusDetails":{"immutable":false,"failed":false,"extendedStatus":"draft","availableActions":{}},
+			"externalIds":{},"lines":[]}`)
+	}))
+	t.Cleanup(server.Close)
+
+	client := &Client{
+		baseURL:   server.URL,
+		apiKey:    "test",
+		isKonnect: true,
+		http:      &http.Client{Timeout: 5 * time.Second},
+	}
+
+	_, err := client.GetInvoice(context.Background(), "inv_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "/billing/invoices/inv_1"; gotPath != want {
+		t.Errorf("Konnect path = %q, want %q (api/v1 should be stripped)", gotPath, want)
+	}
+}
+
 func TestNormalizedTypeStripsThePrefix(t *testing.T) {
 	if got := (Notification{Type: "invoicing.invoice.updated"}).NormalizedType(); got != EventInvoiceUpdated {
 		t.Errorf("NormalizedType = %q, want %q", got, EventInvoiceUpdated)

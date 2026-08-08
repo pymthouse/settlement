@@ -24,10 +24,11 @@ import (
 // three Custom Invoicing completion calls — the only writes settlement makes
 // to OpenMeter — are visible and auditable in one file.
 type Client struct {
-	baseURL string
-	apiKey  string
-	http    *http.Client
-	cfg     config.OpenMeter
+	baseURL   string
+	apiKey    string
+	isKonnect bool
+	http      *http.Client
+	cfg       config.OpenMeter
 }
 
 // New builds a client with a bounded timeout and a keep-alive pool. The worker
@@ -35,12 +36,35 @@ type Client struct {
 func New(cfg config.OpenMeter) *Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConnsPerHost = 32
+	base := strings.TrimRight(cfg.BaseURL, "/")
 	return &Client{
-		baseURL: strings.TrimRight(cfg.BaseURL, "/"),
-		apiKey:  cfg.APIKey,
-		http:    &http.Client{Timeout: cfg.Timeout, Transport: transport},
-		cfg:     cfg,
+		baseURL:   base,
+		apiKey:    cfg.APIKey,
+		isKonnect: isKonnectURL(base),
+		http:      &http.Client{Timeout: cfg.Timeout, Transport: transport},
+		cfg:       cfg,
 	}
+}
+
+// isKonnectURL returns true when the base URL points at Konnect Metering &
+// Billing rather than self-hosted OpenMeter. Konnect's v3 gateway already
+// includes the version prefix, so the SDK-style /api/v1 must be stripped.
+func isKonnectURL(base string) bool {
+	return strings.Contains(base, "konghq.com") || strings.Contains(base, "konnect")
+}
+
+// konnectRewritePath strips the /api/v1 (or /api/v2) prefix that the
+// OpenMeter SDK uses, mirroring pymthouse's rewriteKonnectPathname.
+func konnectRewritePath(path string) string {
+	for _, prefix := range []string{"/api/v1", "/api/v2"} {
+		if strings.HasPrefix(path, prefix) {
+			rest := path[len(prefix):]
+			if rest == "" || rest[0] == '/' || rest[0] == '?' {
+				return rest
+			}
+		}
+	}
+	return path
 }
 
 // APIError is a non-2xx response from OpenMeter.
@@ -211,6 +235,10 @@ func (c *Client) do(ctx context.Context, operation, method, path string, body, o
 	start := time.Now()
 	var err error
 	defer func() { metrics.ObserveUpstream("openmeter", operation, start, err) }()
+
+	if c.isKonnect {
+		path = konnectRewritePath(path)
+	}
 
 	var reader io.Reader
 	if body != nil {
