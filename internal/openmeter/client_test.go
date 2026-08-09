@@ -271,9 +271,9 @@ func TestIsKonnectURL(t *testing.T) {
 	cases := map[string]bool{
 		"https://us.api.konghq.com/v3/openmeter": true,
 		"https://eu.api.konghq.com/v3/openmeter": true,
-		"https://localhost:8080":                  false,
-		"http://openmeter:8888":                   false,
-		"https://billing.konnect.example.com":     true,
+		"https://localhost:8080":                 false,
+		"http://openmeter:8888":                  false,
+		"https://billing.konnect.example.com":    true,
 	}
 	for url, want := range cases {
 		if got := isKonnectURL(url); got != want {
