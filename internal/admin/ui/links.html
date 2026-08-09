@@ -1,0 +1,28 @@
+{{define "links.html"}}
+<section class="panel">
+  <h2>Vendor consoles</h2>
+  <p class="muted">Settlement does not rebuild these UIs — open the vendor tools directly.</p>
+  <table>
+    <tr>
+      <th>Stripe Dashboard</th>
+      <td>{{if .Links.StripeDashboardURL}}<a href="{{.Links.StripeDashboardURL}}" target="_blank" rel="noopener">{{.Links.StripeDashboardURL}}</a>{{else}}<span class="muted">not set</span>{{end}}</td>
+    </tr>
+    <tr>
+      <th>OpenMeter / Konnect UI</th>
+      <td>{{if .Links.OpenMeterUIURL}}<a href="{{.Links.OpenMeterUIURL}}" target="_blank" rel="noopener">{{.Links.OpenMeterUIURL}}</a>{{else}}<span class="muted">set SETTLEMENT_ADMIN_OPENMETER_UI_URL</span>{{end}}</td>
+    </tr>
+    <tr>
+      <th>Railway</th>
+      <td>{{if .Links.RailwayURL}}<a href="{{.Links.RailwayURL}}" target="_blank" rel="noopener">{{.Links.RailwayURL}}</a>{{else}}<span class="muted">set SETTLEMENT_ADMIN_RAILWAY_URL</span>{{end}}</td>
+    </tr>
+    <tr>
+      <th>Producer</th>
+      <td>{{if .Links.ProducerURL}}<a href="{{.Links.ProducerURL}}/healthz" target="_blank" rel="noopener">{{.Links.ProducerURL}}/healthz</a>{{else}}<span class="muted">set SETTLEMENT_ADMIN_PRODUCER_URL</span>{{end}}</td>
+    </tr>
+    <tr>
+      <th>This worker metrics</th>
+      <td><a href="/metrics">/metrics</a> · <a href="/healthz">/healthz</a></td>
+    </tr>
+  </table>
+</section>
+{{end}}

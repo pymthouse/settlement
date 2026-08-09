@@ -1,0 +1,76 @@
+{{define "dlq.html"}}
+{{$c := .Content}}
+<section class="panel">
+  <h2>Dead-letter queue · <span class="mono">{{$c.Topic}}</span></h2>
+  <form method="get" action="/admin/dlq" class="row">
+    <div>
+      <label for="partition">Partition</label>
+      <input id="partition" name="partition" type="number" value="{{$c.Partition}}">
+    </div>
+    <div>
+      <label for="offset">Offset</label>
+      <input id="offset" name="offset" class="mono" value="{{if eq $c.Offset -2}}{{else}}{{$c.Offset}}{{end}}" placeholder="first">
+    </div>
+    <div>
+      <label for="count">Count</label>
+      <input id="count" name="count" type="number" value="{{$c.Count}}">
+    </div>
+    <div><button type="submit">Inspect</button></div>
+  </form>
+  {{if $c.Error}}<div class="error">{{$c.Error}}</div>{{end}}
+</section>
+
+<section class="panel">
+  <h2>Messages</h2>
+  {{if not $c.Records}}
+  <p class="muted">No messages (empty partition or past high watermark).</p>
+  {{else}}
+  <table>
+    <thead>
+      <tr><th>Offset</th><th>Reason</th><th>Event</th><th>Key</th><th>Error</th></tr>
+    </thead>
+    <tbody>
+      {{range $c.Records}}
+      <tr>
+        <td class="mono">{{.Offset}}</td>
+        <td class="mono">{{.DLQReason}}</td>
+        <td class="mono">{{.EventID}}<br><span class="muted">{{.EventType}}</span></td>
+        <td class="mono">{{.Key}}</td>
+        <td class="mono">{{.DLQError}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{end}}
+</section>
+
+<section class="panel">
+  <h2>Redrive</h2>
+  <p class="muted">Stops at the current high watermark. Type <code>REDRIVE</code> to confirm. Prefer dry-run first.</p>
+  <form method="post" action="/admin/dlq/redrive">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <div class="row">
+      <div>
+        <label for="r_partition">Partition</label>
+        <input id="r_partition" name="partition" type="number" value="{{$c.Partition}}">
+      </div>
+      <div>
+        <label for="r_offset">Offset</label>
+        <input id="r_offset" name="offset" class="mono" placeholder="first (default)">
+      </div>
+      <div>
+        <label for="r_count">Count (0=all)</label>
+        <input id="r_count" name="count" type="number" value="0">
+      </div>
+      <div>
+        <label for="r_reason">Reason filter</label>
+        <input id="r_reason" name="reason" class="mono" placeholder="optional">
+      </div>
+    </div>
+    <label><input type="checkbox" name="dry_run" value="1" checked> Dry run</label>
+    <label for="confirm">Confirm</label>
+    <input id="confirm" name="confirm" class="mono" placeholder="REDRIVE" required>
+    <p><button type="submit" class="danger">Redrive DLQ</button></p>
+  </form>
+</section>
+{{end}}

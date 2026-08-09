@@ -191,6 +191,17 @@ type Worker struct {
 	OpenMeter OpenMeter
 	Stripe    Stripe
 	Dedupe    Dedupe
+	Admin     Admin
+}
+
+// Admin configures the worker's optional /admin ops console.
+// An empty Token disables the console (routes return 404).
+type Admin struct {
+	Token              string
+	ProducerURL        string
+	OpenMeterUIURL     string
+	StripeDashboardURL string
+	RailwayURL         string
 }
 
 // LoadProducer reads the doorman configuration from the environment.
@@ -267,6 +278,13 @@ func LoadWorker() (Worker, error) {
 			TTL:       envDuration("SETTLEMENT_DEDUPE_TTL", 720*time.Hour, &errs), // 30 days
 			KeyPrefix: env("SETTLEMENT_DEDUPE_PREFIX", "settlement:dedupe:"),
 			Timeout:   envDuration("SETTLEMENT_DEDUPE_TIMEOUT", 3*time.Second, &errs),
+		},
+		Admin: Admin{
+			Token:              env("SETTLEMENT_ADMIN_TOKEN", ""),
+			ProducerURL:        strings.TrimRight(env("SETTLEMENT_ADMIN_PRODUCER_URL", ""), "/"),
+			OpenMeterUIURL:     strings.TrimRight(env("SETTLEMENT_ADMIN_OPENMETER_UI_URL", ""), "/"),
+			StripeDashboardURL: strings.TrimRight(env("SETTLEMENT_ADMIN_STRIPE_DASHBOARD_URL", "https://dashboard.stripe.com"), "/"),
+			RailwayURL:         strings.TrimRight(env("SETTLEMENT_ADMIN_RAILWAY_URL", ""), "/"),
 		},
 	}
 

@@ -1,0 +1,34 @@
+{{define "layout.html"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · settlement admin</title>
+  <link rel="stylesheet" href="/admin/static/admin.css">
+</head>
+<body>
+  <header>
+    <div class="brand">settlement admin</div>
+    {{if ne .Nav "login"}}
+    <nav>
+      <a href="/admin/" {{if eq .Nav "overview"}}class="active"{{end}}>Overview</a>
+      <a href="/admin/invoice" {{if eq .Nav "invoice"}}class="active"{{end}}>Invoice</a>
+      <a href="/admin/dlq" {{if eq .Nav "dlq"}}class="active"{{end}}>DLQ</a>
+      <a href="/admin/replay" {{if eq .Nav "replay"}}class="active"{{end}}>Replay</a>
+      <a href="/admin/links" {{if eq .Nav "links"}}class="active"{{end}}>Links</a>
+      <form method="post" action="/admin/logout" style="display:inline">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <button type="submit" style="background:transparent;border:none;color:#8b9aab;cursor:pointer;padding:0">Logout</button>
+      </form>
+    </nav>
+    {{end}}
+  </header>
+  <main>
+    {{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+    {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+    {{.Body}}
+  </main>
+</body>
+</html>
+{{end}}

@@ -1,0 +1,12 @@
+{{define "login.html"}}
+<div class="panel" style="max-width:420px;margin:3rem auto">
+  <h2>Admin login</h2>
+  <p class="muted">Enter the shared <code>SETTLEMENT_ADMIN_TOKEN</code>.</p>
+  <form method="post" action="/admin/login">
+    <input type="hidden" name="next" value="{{.Content.Next}}">
+    <label for="token">Token</label>
+    <input id="token" name="token" type="password" autocomplete="current-password" required style="width:100%">
+    <p style="margin-top:1rem"><button type="submit">Sign in</button></p>
+  </form>
+</div>
+{{end}}

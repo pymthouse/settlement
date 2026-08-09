@@ -106,6 +106,14 @@ redelivered and dropped by the dedupe store; no action needed.
 | `settlement_events_in_flight` pinned at the lane ceiling | Handlers are slower than arrivals | Raise `SETTLEMENT_LANES`, or check upstream latency |
 | `settlement_upstream_duration_seconds` p99 climbing | OpenMeter or Stripe is degraded | Expect retries; confirm they are succeeding |
 
+The worker serves a token-gated ops console at `/admin` on
+`SETTLEMENT_METRICS_ADDR` (when `SETTLEMENT_ADMIN_TOKEN` is set). It surfaces
+these counters, invoice lookup with Stripe/OpenMeter deep links, and gated
+DLQ redrive / replay. Stripe Dashboard, Kong/OpenMeter UI, and Railway remain
+the systems of record — configure
+`SETTLEMENT_ADMIN_STRIPE_DASHBOARD_URL`, `SETTLEMENT_ADMIN_OPENMETER_UI_URL`,
+and `SETTLEMENT_ADMIN_RAILWAY_URL`.
+
 A **halted** worker is the loudest state the system has. It logs
 `stopping worker for safety` with a reason and stops committing. It halts only
 when continuing would risk losing or double-processing an event:
@@ -122,6 +130,10 @@ cause, then restart.
 ## Diagnosing a stuck invoice
 
 Start from the invoice, not from the logs.
+
+**Admin console:** with `SETTLEMENT_ADMIN_TOKEN` set, open the worker's
+`/admin/invoice?id=$INVOICE_ID` page for status, `externalIds`, and deep links
+into Stripe / OpenMeter. DLQ inspect and redrive live at `/admin/dlq`.
 
 ```bash
 # 1. What does OpenMeter think?
@@ -193,6 +205,8 @@ Read the parked messages before acting:
 settlementctl inspect -topic billing.settlement.dlq.v1 -offset 0 -count 100 \
   | jq '{offset, reason: .dlq_reason, error: .dlq_error, event_id, event_type}'
 ```
+
+Or use the worker admin console at `/admin/dlq` (requires `SETTLEMENT_ADMIN_TOKEN`).
 
 ---
 
@@ -344,8 +358,8 @@ can be re-verified against it long after the fact.
 ## Implementation tasks
 
 - [ ] Wire the alert rules and page routing for the DLQ and attention metrics
-- [ ] Add a dashboard covering the seven signals in
-      [What to watch](#what-to-watch)
+- [x] Add a dashboard covering the seven signals in
+      [What to watch](#what-to-watch) — worker `/admin` ops console (token-gated)
 - [ ] Document the escalation path for a halted worker
 - [ ] Rehearse a DLQ redrive and a replay in staging, and record how long each
       takes at production volume

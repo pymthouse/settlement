@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/segmentio/kafka-go"
 
+	"github.com/pymthouse/settlement/internal/admin"
 	"github.com/pymthouse/settlement/internal/config"
 	"github.com/pymthouse/settlement/internal/dedupe"
 	"github.com/pymthouse/settlement/internal/kafkax"
@@ -93,7 +95,7 @@ func run() int {
 
 	metricsSrv := &http.Server{
 		Addr:              cfg.MetricsAddr,
-		Handler:           observabilityRoutes(),
+		Handler:           observabilityRoutes(cfg, om, log),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
@@ -115,6 +117,7 @@ func run() int {
 		"openmeter", cfg.OpenMeter.BaseURL,
 		"charge_model", cfg.Stripe.DefaultChargeModel,
 		"metrics_addr", cfg.MetricsAddr,
+		"admin_enabled", cfg.Admin.Token != "",
 	)
 
 	runErr := runner.Run(ctx)
@@ -136,7 +139,7 @@ func run() int {
 	return 0
 }
 
-func observabilityRoutes() http.Handler {
+func observabilityRoutes(cfg config.Worker, om *openmeter.Client, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", metrics.Handler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -147,5 +150,14 @@ func observabilityRoutes() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ready")
 	})
+	adminHandler := admin.Handler(admin.Deps{
+		Admin:     cfg.Admin,
+		Kafka:     cfg.Kafka,
+		OpenMeter: om,
+		RedisURL:  cfg.Dedupe.RedisURL,
+		Log:       log,
+	})
+	mux.Handle("/admin/", adminHandler)
+	mux.Handle("/admin", adminHandler)
 	return mux
 }

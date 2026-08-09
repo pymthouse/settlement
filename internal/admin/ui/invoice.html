@@ -1,0 +1,41 @@
+{{define "invoice.html"}}
+{{$c := .Content}}
+<section class="panel">
+  <h2>OpenMeter invoice lookup</h2>
+  <form method="get" action="/admin/invoice" class="row">
+    <div>
+      <label for="id">Invoice ID</label>
+      <input id="id" name="id" class="mono" value="{{$c.ID}}" required placeholder="01KZ…">
+    </div>
+    <div><button type="submit">Lookup</button></div>
+  </form>
+</section>
+
+{{if $c.LookupError}}
+<div class="error">{{$c.LookupError}}</div>
+{{end}}
+
+{{if $c.Invoice}}
+<section class="panel">
+  <h2>{{$c.Invoice.ID}}</h2>
+  <table>
+    <tr><th>Status</th><td class="mono">{{$c.Invoice.Status}} / {{$c.Invoice.StatusDetails.ExtendedStatus}}</td></tr>
+    <tr><th>Failed</th><td>{{$c.Invoice.StatusDetails.Failed}}</td></tr>
+    <tr><th>Immutable</th><td>{{$c.Invoice.StatusDetails.Immutable}}</td></tr>
+    <tr><th>Currency / total</th><td class="mono">{{$c.Invoice.Currency}} {{$c.Invoice.Totals.Total}}</td></tr>
+    <tr><th>Customer</th><td class="mono">{{$c.Invoice.Customer.ID}} {{$c.Invoice.Customer.Name}}</td></tr>
+    <tr><th>externalIds.invoicing</th><td class="mono">{{$c.Invoice.ExternalIDs.Invoicing}}</td></tr>
+    <tr><th>externalIds.payment</th><td class="mono">{{$c.Invoice.ExternalIDs.Payment}}</td></tr>
+  </table>
+  <p style="margin-top:1rem">
+    {{if $c.OpenMeterURL}}<a class="btn" href="{{$c.OpenMeterURL}}" target="_blank" rel="noopener">OpenMeter UI</a>{{end}}
+    {{if $c.StripeInvoiceURL}}<a class="btn" href="{{$c.StripeInvoiceURL}}" target="_blank" rel="noopener">Stripe invoice</a>{{end}}
+    {{if $c.StripePaymentURL}}<a class="btn" href="{{$c.StripePaymentURL}}" target="_blank" rel="noopener">Stripe payment</a>{{end}}
+  </p>
+  {{if $c.Invoice.ValidationIssues}}
+  <h3>Validation issues</h3>
+  <pre>{{printf "%+v" $c.Invoice.ValidationIssues}}</pre>
+  {{end}}
+</section>
+{{end}}
+{{end}}

@@ -1,0 +1,41 @@
+{{define "overview.html"}}
+{{$c := .Content}}
+<section class="panel">
+  <h2>Service status</h2>
+  <div class="grid">
+    <div class="stat">
+      <div class="name">Worker</div>
+      <div class="value status-ok">ok</div>
+    </div>
+    <div class="stat">
+      <div class="name">Producer {{if $c.ProducerURL}}(<a href="{{$c.ProducerURL}}/healthz">healthz</a>){{end}}</div>
+      <div class="value {{if eq $c.ProducerOK "ok"}}status-ok{{else if eq $c.ProducerOK "not configured"}}{{else}}status-bad{{end}}">{{$c.ProducerOK}}</div>
+    </div>
+    <div class="stat">
+      <div class="name">Redis dedupe</div>
+      <div class="value">{{if $c.RedisConfigured}}configured{{else}}in-process only{{end}}</div>
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>What to watch</h2>
+  <p class="muted">In-process Prometheus counters/gauges from this worker. Scrape <a href="/metrics">/metrics</a> for Grafana.</p>
+  <div class="grid">
+    {{range $c.Signals}}
+    <div class="stat">
+      <div class="name">{{.Help}}</div>
+      <div class="value">{{.Value}}</div>
+      <div class="muted mono">{{.Name}}</div>
+    </div>
+    {{end}}
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Kafka topics</h2>
+  <ul class="mono">
+    {{range $c.Topics}}<li>{{.}}</li>{{end}}
+  </ul>
+</section>
+{{end}}

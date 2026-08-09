@@ -1,0 +1,38 @@
+{{define "replay.html"}}
+{{$c := .Content}}
+<section class="panel">
+  <h2>Replay topic history</h2>
+  <p class="muted">Republishes with a batch id so the worker bypasses dedupe. Defaults to dry-run. Type <code>REPLAY</code> to confirm.</p>
+  {{if $c.Result}}<div class="flash">{{$c.Result}}</div>{{end}}
+  {{if $c.Error}}<div class="error">{{$c.Error}}</div>{{end}}
+  <form method="post" action="/admin/replay">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <div class="row">
+      <div>
+        <label for="topic">Topic</label>
+        <select id="topic" name="topic">
+          {{range $c.Topics}}
+          <option value="{{.}}" {{if eq $.Content.Topic .}}selected{{end}}>{{.}}</option>
+          {{end}}
+        </select>
+      </div>
+      <div>
+        <label for="partition">Partition</label>
+        <input id="partition" name="partition" type="number" value="{{$c.Partition}}">
+      </div>
+      <div>
+        <label for="offset">Offset</label>
+        <input id="offset" name="offset" class="mono" value="{{$c.Offset}}" placeholder="first">
+      </div>
+      <div>
+        <label for="count">Count (0=to end)</label>
+        <input id="count" name="count" type="number" value="{{$c.Count}}">
+      </div>
+    </div>
+    <label><input type="checkbox" name="dry_run" value="1" {{if $c.DryRun}}checked{{end}}> Dry run (recommended)</label>
+    <label for="confirm">Confirm</label>
+    <input id="confirm" name="confirm" class="mono" placeholder="REPLAY" required>
+    <p><button type="submit" class="danger">Replay</button></p>
+  </form>
+</section>
+{{end}}
