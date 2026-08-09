@@ -313,18 +313,46 @@ func TestKonnectClientRewritesPaths(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	client := &Client{
-		baseURL:   server.URL,
-		apiKey:    "test",
-		isKonnect: true,
-		http:      &http.Client{Timeout: 5 * time.Second},
+		baseURL:       server.URL + "/v3/openmeter",
+		meteringV1URL: server.URL + "/metering/v1",
+		apiKey:        "test",
+		isKonnect:     true,
+		http:          &http.Client{Timeout: 5 * time.Second},
 	}
 
 	_, err := client.GetInvoice(context.Background(), "inv_1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "/billing/invoices/inv_1"; gotPath != want {
-		t.Errorf("Konnect path = %q, want %q (api/v1 should be stripped)", gotPath, want)
+	if want := "/metering/v1/billing/invoices/inv_1"; gotPath != want {
+		t.Errorf("Konnect path = %q, want %q (invoice GET must use metering/v1)", gotPath, want)
+	}
+
+	gotPath = ""
+	if err := client.DraftSynchronized(context.Background(), "inv_1", DraftSynchronizedRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if want := "/metering/v1/apps/custom-invoicing/inv_1/draft/synchronized"; gotPath != want {
+		t.Errorf("Konnect draft sync path = %q, want %q", gotPath, want)
+	}
+}
+
+func TestKonnectMeteringV1Base(t *testing.T) {
+	got := konnectMeteringV1Base("https://us.api.konghq.com/v3/openmeter")
+	if want := "https://us.api.konghq.com/metering/v1"; got != want {
+		t.Errorf("konnectMeteringV1Base = %q, want %q", got, want)
+	}
+}
+
+func TestKonnectNeedsMeteringV1(t *testing.T) {
+	if !konnectNeedsMeteringV1("/billing/invoices/inv_1?expand=lines", http.MethodGet) {
+		t.Error("invoice GET should use metering/v1")
+	}
+	if !konnectNeedsMeteringV1("/apps/custom-invoicing/inv_1/draft/synchronized", http.MethodPost) {
+		t.Error("draft sync should use metering/v1")
+	}
+	if konnectNeedsMeteringV1("/customers/cust_1", http.MethodGet) {
+		t.Error("customer GET can stay on v3/openmeter")
 	}
 }
 

@@ -24,11 +24,12 @@ import (
 // three Custom Invoicing completion calls — the only writes settlement makes
 // to OpenMeter — are visible and auditable in one file.
 type Client struct {
-	baseURL   string
-	apiKey    string
-	isKonnect bool
-	http      *http.Client
-	cfg       config.OpenMeter
+	baseURL       string
+	meteringV1URL string
+	apiKey        string
+	isKonnect     bool
+	http          *http.Client
+	cfg           config.OpenMeter
 }
 
 // New builds a client with a bounded timeout and a keep-alive pool. The worker
@@ -38,11 +39,12 @@ func New(cfg config.OpenMeter) *Client {
 	transport.MaxIdleConnsPerHost = 32
 	base := strings.TrimRight(cfg.BaseURL, "/")
 	return &Client{
-		baseURL:   base,
-		apiKey:    cfg.APIKey,
-		isKonnect: isKonnectURL(base),
-		http:      &http.Client{Timeout: cfg.Timeout, Transport: transport},
-		cfg:       cfg,
+		baseURL:       base,
+		meteringV1URL: konnectMeteringV1Base(base),
+		apiKey:        cfg.APIKey,
+		isKonnect:     isKonnectURL(base),
+		http:          &http.Client{Timeout: cfg.Timeout, Transport: transport},
+		cfg:           cfg,
 	}
 }
 
@@ -51,6 +53,18 @@ func New(cfg config.OpenMeter) *Client {
 // includes the version prefix, so the SDK-style /api/v1 must be stripped.
 func isKonnectURL(base string) bool {
 	return strings.Contains(base, "konghq.com") || strings.Contains(base, "konnect")
+}
+
+// konnectMeteringV1Base returns the Cloud UI / portal base
+// (`https://{region}.api.konghq.com/metering/v1`). Invoice GET and Custom
+// Invoicing completions 405 on `/v3/openmeter` the same way pymthouse invoice
+// POSTs did — those paths must hit metering/v1.
+func konnectMeteringV1Base(base string) string {
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" {
+		return base
+	}
+	return u.Scheme + "://" + u.Host + "/metering/v1"
 }
 
 // konnectRewritePath strips the /api/v1 (or /api/v2) prefix that the
@@ -65,6 +79,22 @@ func konnectRewritePath(path string) string {
 		}
 	}
 	return path
+}
+
+// konnectNeedsMeteringV1 reports paths that must leave `/v3/openmeter` for
+// `/metering/v1` on Konnect (invoice reads + Custom Invoicing writes).
+func konnectNeedsMeteringV1(path, method string) bool {
+	pathOnly := path
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		pathOnly = path[:i]
+	}
+	if strings.HasPrefix(pathOnly, "/apps/custom-invoicing/") {
+		return true
+	}
+	if method == http.MethodGet && strings.HasPrefix(pathOnly, "/billing/invoices") {
+		return true
+	}
+	return false
 }
 
 // APIError is a non-2xx response from OpenMeter.
@@ -250,7 +280,12 @@ func (c *Client) do(ctx context.Context, operation, method, path string, body, o
 		reader = bytes.NewReader(encoded)
 	}
 
-	req, reqErr := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	base := c.baseURL
+	if c.isKonnect && konnectNeedsMeteringV1(path, method) {
+		base = c.meteringV1URL
+	}
+
+	req, reqErr := http.NewRequestWithContext(ctx, method, base+path, reader)
 	if reqErr != nil {
 		err = fmt.Errorf("openmeter %s: build request: %w", operation, reqErr)
 		return err
