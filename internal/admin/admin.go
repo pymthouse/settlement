@@ -28,6 +28,9 @@ import (
 const (
 	cookieName   = "settlement_admin"
 	csrfFormName = "csrf"
+	adminRoot    = "/admin"
+	adminHome    = "/admin/"
+	adminLogin   = "/admin/login"
 )
 
 //go:embed all:ui
@@ -100,7 +103,7 @@ type pageData struct {
 func (s *server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.authorized(r) {
-			http.Redirect(w, r, "/admin/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
+			http.Redirect(w, r, adminLogin+"?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
 			return
 		}
 		if r.Method == http.MethodPost && !s.validCSRF(r) {
@@ -158,7 +161,7 @@ func sameOriginOK(r *http.Request) bool {
 
 func (s *server) handleLoginGet(w http.ResponseWriter, r *http.Request) {
 	if s.authorized(r) {
-		http.Redirect(w, r, "/admin/", http.StatusSeeOther)
+		http.Redirect(w, r, adminHome, http.StatusSeeOther)
 		return
 	}
 	s.render(w, "login.html", pageData{
@@ -187,33 +190,29 @@ func (s *server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
 		Value:    s.deps.Admin.Token,
-		Path:     "/admin",
+		Path:     adminRoot,
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   cookieSecure(r),
+		Secure:   true,
 	})
 	next := r.FormValue("next")
-	if next == "" || !strings.HasPrefix(next, "/admin") {
-		next = "/admin/"
+	if next == "" || !strings.HasPrefix(next, adminRoot) {
+		next = adminHome
 	}
 	http.Redirect(w, r, next, http.StatusSeeOther)
-}
-
-func cookieSecure(r *http.Request) bool {
-	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
 		Value:    "",
-		Path:     "/admin",
+		Path:     adminRoot,
 		MaxAge:   -1,
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   cookieSecure(r),
+		Secure:   true,
 	})
-	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+	http.Redirect(w, r, adminLogin, http.StatusSeeOther)
 }
 
 type overviewContent struct {
@@ -282,43 +281,43 @@ func gatherWatchSignals() []signalRow {
 	for _, f := range families {
 		byName[f.GetName()] = f
 	}
-
-	sumCounter := func(name string) float64 {
-		f := byName[name]
-		if f == nil {
-			return 0
-		}
-		var sum float64
-		for _, m := range f.Metric {
-			if m.Counter != nil {
-				sum += m.Counter.GetValue()
-			}
-		}
-		return sum
-	}
-	gaugeVal := func(name string) float64 {
-		f := byName[name]
-		if f == nil {
-			return 0
-		}
-		var sum float64
-		for _, m := range f.Metric {
-			if m.Gauge != nil {
-				sum += m.Gauge.GetValue()
-			}
-		}
-		return sum
-	}
-
 	return []signalRow{
-		{Name: "settlement_dead_lettered_total", Help: "DLQ park events", Value: fmt.Sprintf("%.0f", sumCounter("settlement_dead_lettered_total"))},
-		{Name: "settlement_invoices_needing_attention_total", Help: "Failed/overdue/uncollectible", Value: fmt.Sprintf("%.0f", sumCounter("settlement_invoices_needing_attention_total"))},
-		{Name: "settlement_webhooks_received_total", Help: "Doorman inbound (see labels)", Value: fmt.Sprintf("%.0f", sumCounter("settlement_webhooks_received_total"))},
-		{Name: "settlement_committed_offset", Help: "Sum of committed offsets", Value: fmt.Sprintf("%.0f", gaugeVal("settlement_committed_offset"))},
-		{Name: "settlement_reconcile_redriven_total", Help: "Sweeper redrives", Value: fmt.Sprintf("%.0f", sumCounter("settlement_reconcile_redriven_total"))},
-		{Name: "settlement_events_in_flight", Help: "Currently processing", Value: fmt.Sprintf("%.0f", gaugeVal("settlement_events_in_flight"))},
-		{Name: "settlement_upstream_requests_total", Help: "OpenMeter/Stripe calls", Value: fmt.Sprintf("%.0f", sumCounter("settlement_upstream_requests_total"))},
+		{Name: "settlement_dead_lettered_total", Help: "DLQ park events", Value: fmt.Sprintf("%.0f", sumCounter(byName, "settlement_dead_lettered_total"))},
+		{Name: "settlement_invoices_needing_attention_total", Help: "Failed/overdue/uncollectible", Value: fmt.Sprintf("%.0f", sumCounter(byName, "settlement_invoices_needing_attention_total"))},
+		{Name: "settlement_webhooks_received_total", Help: "Doorman inbound (see labels)", Value: fmt.Sprintf("%.0f", sumCounter(byName, "settlement_webhooks_received_total"))},
+		{Name: "settlement_committed_offset", Help: "Sum of committed offsets", Value: fmt.Sprintf("%.0f", gaugeVal(byName, "settlement_committed_offset"))},
+		{Name: "settlement_reconcile_redriven_total", Help: "Sweeper redrives", Value: fmt.Sprintf("%.0f", sumCounter(byName, "settlement_reconcile_redriven_total"))},
+		{Name: "settlement_events_in_flight", Help: "Currently processing", Value: fmt.Sprintf("%.0f", gaugeVal(byName, "settlement_events_in_flight"))},
+		{Name: "settlement_upstream_requests_total", Help: "OpenMeter/Stripe calls", Value: fmt.Sprintf("%.0f", sumCounter(byName, "settlement_upstream_requests_total"))},
 	}
+}
+
+func sumCounter(byName map[string]*dto.MetricFamily, name string) float64 {
+	f := byName[name]
+	if f == nil {
+		return 0
+	}
+	var sum float64
+	for _, m := range f.Metric {
+		if m.Counter != nil {
+			sum += m.Counter.GetValue()
+		}
+	}
+	return sum
+}
+
+func gaugeVal(byName map[string]*dto.MetricFamily, name string) float64 {
+	f := byName[name]
+	if f == nil {
+		return 0
+	}
+	var sum float64
+	for _, m := range f.Metric {
+		if m.Gauge != nil {
+			sum += m.Gauge.GetValue()
+		}
+	}
+	return sum
 }
 
 type invoiceContent struct {
@@ -455,7 +454,7 @@ func (s *server) handleDLQRedrive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	flash := fmt.Sprintf("redriven=%d skipped=%d batch=%s dry_run=%v", result.Published, result.Skipped, result.BatchID, dryRun)
-	http.Redirect(w, r, "/admin/dlq?flash="+url.QueryEscape(flash), http.StatusSeeOther)
+	http.Redirect(w, r, adminRoot+"/dlq?flash="+url.QueryEscape(flash), http.StatusSeeOther)
 }
 
 type replayContent struct {

@@ -112,7 +112,8 @@ these counters, invoice lookup with Stripe/OpenMeter deep links, and gated
 DLQ redrive / replay. Stripe Dashboard, Kong/OpenMeter UI, and Railway remain
 the systems of record — configure
 `SETTLEMENT_ADMIN_STRIPE_DASHBOARD_URL`, `SETTLEMENT_ADMIN_OPENMETER_UI_URL`,
-and `SETTLEMENT_ADMIN_RAILWAY_URL`.
+and `SETTLEMENT_ADMIN_RAILWAY_URL`. Cookie login sets `Secure` (HTTPS only);
+use `Authorization: Bearer $SETTLEMENT_ADMIN_TOKEN` for plain-HTTP local access.
 
 A **halted** worker is the loudest state the system has. It logs
 `stopping worker for safety` with a reason and stops committing. It halts only

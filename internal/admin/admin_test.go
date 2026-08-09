@@ -73,6 +73,11 @@ func TestLoginSetsCookie(t *testing.T) {
 	if !found {
 		t.Fatalf("expected HttpOnly admin cookie, got %#v", cookie)
 	}
+	for _, c := range cookie {
+		if c.Name == cookieName && !c.Secure {
+			t.Fatalf("expected Secure cookie for admin session")
+		}
+	}
 }
 
 func TestRedriveRequiresConfirm(t *testing.T) {

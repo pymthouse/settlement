@@ -54,10 +54,6 @@ func Inspect(ctx context.Context, opts config.Kafka, in InspectInput) ([]Inspect
 	if in.Count <= 0 {
 		in.Count = 10
 	}
-	if in.Offset == 0 {
-		// Callers that mean "start of log" pass kafka.FirstOffset (-2).
-		// Zero is ambiguous; treat unset as LastOffset for UI defaults.
-	}
 
 	reader, err := kafkax.NewPartitionReader(opts, in.Topic, in.Partition, in.Offset)
 	if err != nil {
@@ -74,30 +70,33 @@ func Inspect(ctx context.Context, opts config.Kafka, in InspectInput) ([]Inspect
 		if stop != readContinue {
 			break
 		}
-
-		rec := InspectRecord{
-			Offset:    msg.Offset,
-			Partition: msg.Partition,
-			Time:      msg.Time.UTC().Format(time.RFC3339Nano),
-			Key:       string(msg.Key),
-			Source:    kafkax.Header(msg, events.HeaderSource),
-			EventID:   kafkax.Header(msg, events.HeaderEventID),
-			EventType: kafkax.Header(msg, events.HeaderEventType),
-			Bytes:     len(msg.Value),
-			DLQReason: kafkax.Header(msg, events.HeaderDLQReason),
-			DLQError:  kafkax.Header(msg, events.HeaderDLQError),
-			DLQTopic:  kafkax.Header(msg, events.HeaderDLQTopic),
-		}
-		if in.Full && len(msg.Value) > 0 {
-			if json.Valid(msg.Value) {
-				rec.Body = json.RawMessage(append([]byte(nil), msg.Value...))
-			} else {
-				rec.BodyText = string(msg.Value)
-			}
-		}
-		out = append(out, rec)
+		out = append(out, inspectRecordFromMessage(msg, in.Full))
 	}
 	return out, nil
+}
+
+func inspectRecordFromMessage(msg kafka.Message, full bool) InspectRecord {
+	rec := InspectRecord{
+		Offset:    msg.Offset,
+		Partition: msg.Partition,
+		Time:      msg.Time.UTC().Format(time.RFC3339Nano),
+		Key:       string(msg.Key),
+		Source:    kafkax.Header(msg, events.HeaderSource),
+		EventID:   kafkax.Header(msg, events.HeaderEventID),
+		EventType: kafkax.Header(msg, events.HeaderEventType),
+		Bytes:     len(msg.Value),
+		DLQReason: kafkax.Header(msg, events.HeaderDLQReason),
+		DLQError:  kafkax.Header(msg, events.HeaderDLQError),
+		DLQTopic:  kafkax.Header(msg, events.HeaderDLQTopic),
+	}
+	if full && len(msg.Value) > 0 {
+		if json.Valid(msg.Value) {
+			rec.Body = json.RawMessage(append([]byte(nil), msg.Value...))
+		} else {
+			rec.BodyText = string(msg.Value)
+		}
+	}
+	return rec
 }
 
 // ReplayInput describes a bounded replay of a source topic partition.
@@ -287,12 +286,11 @@ func drain(ctx context.Context, req drainRequest) (published, skipped int, err e
 	}
 	defer func() { _ = reader.Close() }()
 
-	var publisher *kafkax.Publisher
-	if !req.dryRun {
-		publisher, err = kafkax.NewPublisher(req.opts)
-		if err != nil {
-			return 0, 0, err
-		}
+	publisher, err := maybePublisher(req)
+	if err != nil {
+		return 0, 0, err
+	}
+	if publisher != nil {
 		defer func() { _ = publisher.Close() }()
 	}
 
@@ -303,32 +301,51 @@ func drain(ctx context.Context, req drainRequest) (published, skipped int, err e
 			return published, skipped, fmt.Errorf("read %s/%d: %w", req.topic, req.partition, readErr)
 		}
 		if stop != readContinue {
-			if lastOffset < end-1 {
-				return published, skipped, fmt.Errorf(
-					"incomplete drain of %s/%d: stopped (%s) at offset %d before end %d",
-					req.topic, req.partition, stop, lastOffset, end-1)
-			}
-			break
+			return published, skipped, drainStopError(req, stop, lastOffset, end)
 		}
 
 		lastOffset = msg.Offset
-		target, send := req.route(msg)
-		if send {
-			if !req.dryRun {
-				if err := publisher.Publish(ctx, replayMessage(msg, target, req.batchID)); err != nil {
-					return published, skipped, err
-				}
-			}
-			published++
-		} else {
-			skipped++
+		pub, skip, err := applyDrainMessage(ctx, req, publisher, msg)
+		if err != nil {
+			return published, skipped, err
 		}
+		published += pub
+		skipped += skip
 
 		if msg.Offset >= end-1 {
 			break
 		}
 	}
 	return published, skipped, nil
+}
+
+func maybePublisher(req drainRequest) (*kafkax.Publisher, error) {
+	if req.dryRun {
+		return nil, nil
+	}
+	return kafkax.NewPublisher(req.opts)
+}
+
+func drainStopError(req drainRequest, stop readStop, lastOffset, end int64) error {
+	if lastOffset < end-1 {
+		return fmt.Errorf(
+			"incomplete drain of %s/%d: stopped (%s) at offset %d before end %d",
+			req.topic, req.partition, stop, lastOffset, end-1)
+	}
+	return nil
+}
+
+func applyDrainMessage(ctx context.Context, req drainRequest, publisher *kafkax.Publisher, msg kafka.Message) (published, skipped int, err error) {
+	target, send := req.route(msg)
+	if !send {
+		return 0, 1, nil
+	}
+	if publisher != nil {
+		if err := publisher.Publish(ctx, replayMessage(msg, target, req.batchID)); err != nil {
+			return 0, 0, err
+		}
+	}
+	return 1, 0, nil
 }
 
 func replayMessage(msg kafka.Message, topic, batchID string) kafka.Message {
