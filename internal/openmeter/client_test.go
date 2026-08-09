@@ -351,8 +351,46 @@ func TestKonnectNeedsMeteringV1(t *testing.T) {
 	if !konnectNeedsMeteringV1("/apps/custom-invoicing/inv_1/draft/synchronized", http.MethodPost) {
 		t.Error("draft sync should use metering/v1")
 	}
-	if konnectNeedsMeteringV1("/customers/cust_1", http.MethodGet) {
-		t.Error("customer GET can stay on v3/openmeter")
+	if !konnectNeedsMeteringV1("/customers/cust_1", http.MethodGet) {
+		t.Error("customer GET should use metering/v1 (metadata vs labels)")
+	}
+}
+
+func TestCustomerMetadataMergesLabels(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{
+			"id":"cust_1",
+			"metadata":{"stripe_charge_model":"direct"},
+			"labels":{"stripe_connect_account_id":"acct_123","stripe_charge_model":"destination"}
+		}`)
+	}))
+	t.Cleanup(server.Close)
+
+	client := &Client{
+		baseURL:       server.URL + "/v3/openmeter",
+		meteringV1URL: server.URL + "/metering/v1",
+		apiKey:        "test",
+		isKonnect:     true,
+		http:          &http.Client{Timeout: 5 * time.Second},
+	}
+
+	meta, err := client.CustomerMetadata(context.Background(), "cust_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "/metering/v1/customers/cust_1"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if meta.Get("stripe_connect_account_id") != "acct_123" {
+		t.Errorf("connect account = %q, want acct_123 from labels", meta.Get("stripe_connect_account_id"))
+	}
+	// metadata wins over labels on key collision
+	if meta.Get("stripe_charge_model") != "direct" {
+		t.Errorf("charge model = %q, want direct from metadata", meta.Get("stripe_charge_model"))
 	}
 }
 
