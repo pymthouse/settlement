@@ -82,7 +82,9 @@ func konnectRewritePath(path string) string {
 }
 
 // konnectNeedsMeteringV1 reports paths that must leave `/v3/openmeter` for
-// `/metering/v1` on Konnect (invoice reads + Custom Invoicing writes).
+// `/metering/v1` on Konnect (invoice reads, customer metadata, Custom
+// Invoicing writes). Customer GET on `/v3/openmeter` returns Connect routing
+// keys under `labels` with `metadata` null; metering/v1 returns `metadata`.
 func konnectNeedsMeteringV1(path, method string) bool {
 	pathOnly := path
 	if i := strings.IndexByte(path, '?'); i >= 0 {
@@ -92,6 +94,9 @@ func konnectNeedsMeteringV1(path, method string) bool {
 		return true
 	}
 	if method == http.MethodGet && strings.HasPrefix(pathOnly, "/billing/invoices") {
+		return true
+	}
+	if method == http.MethodGet && strings.HasPrefix(pathOnly, "/customers/") {
 		return true
 	}
 	return false
@@ -230,15 +235,31 @@ func (c *Client) ListInvoices(ctx context.Context, in ListInvoicesInput) (*Invoi
 
 // CustomerMetadata fetches a customer's metadata, which is where the Connect
 // account id and per-customer charge model live.
+//
+// Konnect `/v3/openmeter` stores these keys in `labels` (with `metadata` null);
+// `/metering/v1` returns them under `metadata`. Merge both so either shape
+// resolves the Connect account.
 func (c *Client) CustomerMetadata(ctx context.Context, customerID string) (Metadata, error) {
 	path := fmt.Sprintf("/api/v1/customers/%s", url.PathEscape(customerID))
 	var out struct {
 		Metadata Metadata `json:"metadata"`
+		Labels   Metadata `json:"labels"`
 	}
 	if err := c.get(ctx, "get_customer", path, &out); err != nil {
 		return nil, err
 	}
-	return out.Metadata, nil
+	merged := Metadata{}
+	for k, v := range out.Labels {
+		if strings.TrimSpace(v) != "" {
+			merged[k] = v
+		}
+	}
+	for k, v := range out.Metadata {
+		if strings.TrimSpace(v) != "" {
+			merged[k] = v
+		}
+	}
+	return merged, nil
 }
 
 // DraftSyncStatuses returns the extendedStatus values that mean "waiting on the
