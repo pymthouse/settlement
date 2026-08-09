@@ -110,8 +110,20 @@ func (s *Settler) DriveInvoice(ctx context.Context, inv *openmeter.Invoice) (str
 
 	// Not at a pause point. Every other state either belongs to OpenMeter
 	// alone (gathering, issued while Stripe collects) or is terminal.
-	s.log.Debug("invoice not at a sync hook",
-		"invoice_id", inv.ID, "status", inv.Status, "extended_status", extended)
+	// Draft* noops (draft / draft.invalid) are Info so ops can see why a
+	// webhook did not reach Connect — Debug left reconcile sweeps silent.
+	msg := "invoice not at a sync hook"
+	attrs := []any{
+		"invoice_id", inv.ID,
+		"status", inv.Status,
+		"extended_status", extended,
+	}
+	if strings.HasPrefix(strings.ToLower(inv.Status), "draft") ||
+		strings.HasPrefix(strings.ToLower(extended), "draft") {
+		s.log.Info(msg, attrs...)
+	} else {
+		s.log.Debug(msg, attrs...)
+	}
 	return HandlerNoop, nil
 }
 
