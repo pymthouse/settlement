@@ -228,7 +228,7 @@ func TestFinalizeInvoicePassesAutoAdvance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotPath != "/v1/invoices/in_1/finalize_invoice" {
+	if gotPath != "/v1/invoices/in_1/finalize" {
 		t.Errorf("path = %q", gotPath)
 	}
 	if gotAutoAdvance != "true" {

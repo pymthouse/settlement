@@ -326,7 +326,8 @@ func (c *Client) FinalizeInvoice(ctx context.Context, id string, autoAdvance boo
 	params.Add("expand[]", "payments")
 
 	var out Invoice
-	path := "/v1/invoices/" + url.PathEscape(id) + "/finalize_invoice"
+	// Stripe API is POST /v1/invoices/{id}/finalize (not finalize_invoice).
+	path := "/v1/invoices/" + url.PathEscape(id) + "/finalize"
 	if err := c.do(ctx, "finalize_invoice", http.MethodPost, path, params, opts, &out); err != nil {
 		return nil, err
 	}

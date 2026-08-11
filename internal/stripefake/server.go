@@ -138,7 +138,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/invoices/search", s.withAuth(s.searchInvoices))
 	mux.HandleFunc("GET /v1/invoices/{id}", s.withAuth(s.getInvoice))
 	mux.HandleFunc("POST /v1/invoices/{id}", s.withAuth(s.updateInvoice))
-	mux.HandleFunc("POST /v1/invoices/{id}/finalize_invoice", s.withAuth(s.finalizeInvoice))
+	mux.HandleFunc("POST /v1/invoices/{id}/finalize", s.withAuth(s.finalizeInvoice))
 	mux.HandleFunc("POST /v1/invoices/{id}/void", s.withAuth(s.voidInvoice))
 	mux.HandleFunc("POST /v1/invoiceitems", s.withAuth(s.createInvoiceItem))
 	mux.HandleFunc("GET /v1/invoiceitems", s.withAuth(s.listInvoiceItems))
