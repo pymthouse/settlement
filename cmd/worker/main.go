@@ -57,6 +57,17 @@ func run() int {
 		log.Warn("no SETTLEMENT_REDIS_URL: using in-process dedupe, which is only correct for a single replica")
 	}
 
+	// Idempotent and best-effort: a topic that already exists is left alone,
+	// and a fresh environment (or a newly added topic, like the collect-
+	// request lane) no longer depends on someone remembering to run
+	// `settlementctl topics ensure` by hand before the first deploy. Mirrors
+	// the identical call in cmd/producer; harmless to run from both.
+	ensureCtx, cancelEnsure := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := kafkax.EnsureTopics(ensureCtx, cfg.Kafka, kafkax.DefaultBillingTopicSpecs(cfg.Kafka)); err != nil {
+		log.Warn("ensure billing topics", "error", err)
+	}
+	cancelEnsure()
+
 	dlq, err := kafkax.NewPublisher(cfg.Kafka)
 	if err != nil {
 		log.Error("kafka publisher", "error", err)

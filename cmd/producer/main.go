@@ -26,6 +26,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Idempotent and best-effort: a topic that already exists is left alone,
+	// and a fresh environment (or a newly added topic, like the collect-
+	// request lane) no longer depends on someone remembering to run
+	// `settlementctl topics ensure` by hand before the first deploy. A
+	// failure here is logged, not fatal — it usually means the topics
+	// already exist under settings an operator deliberately customized via
+	// the CLI, and crash-looping the doorman over that would be worse than
+	// letting it start and surface a real problem on first publish.
+	ensureCtx, cancelEnsure := context.WithTimeout(ctx, 10*time.Second)
+	if err := kafkax.EnsureTopics(ensureCtx, cfg.Kafka, kafkax.DefaultBillingTopicSpecs(cfg.Kafka)); err != nil {
+		log.Warn("ensure billing topics", "error", err)
+	}
+	cancelEnsure()
+
 	publisher, err := kafkax.NewPublisher(cfg.Kafka)
 	if err != nil {
 		log.Error("kafka publisher", "error", err)
@@ -47,9 +64,6 @@ func main() {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	errCh := make(chan error, 1)
 	go func() {
