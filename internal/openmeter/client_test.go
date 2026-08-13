@@ -282,6 +282,46 @@ func TestInvoicePendingLines(t *testing.T) {
 	})
 }
 
+func TestSnapshotAdvanceApproveHitTheDocumentedEndpoints(t *testing.T) {
+	var gotPath, gotMethod string
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		w.WriteHeader(http.StatusOK)
+	}))
+	ctx := context.Background()
+
+	t.Run("snapshot quantities", func(t *testing.T) {
+		if err := client.SnapshotQuantities(ctx, "inv_1"); err != nil {
+			t.Fatal(err)
+		}
+		if gotMethod != http.MethodPost {
+			t.Errorf("method = %q, want POST", gotMethod)
+		}
+		if want := "/api/v1/billing/invoices/inv_1/snapshot-quantities"; gotPath != want {
+			t.Errorf("path = %q, want %q", gotPath, want)
+		}
+	})
+
+	t.Run("advance", func(t *testing.T) {
+		if err := client.Advance(ctx, "inv_1"); err != nil {
+			t.Fatal(err)
+		}
+		if want := "/api/v1/billing/invoices/inv_1/advance"; gotPath != want {
+			t.Errorf("path = %q, want %q", gotPath, want)
+		}
+	})
+
+	t.Run("approve", func(t *testing.T) {
+		if err := client.Approve(ctx, "inv_1"); err != nil {
+			t.Fatal(err)
+		}
+		if want := "/api/v1/billing/invoices/inv_1/approve"; gotPath != want {
+			t.Errorf("path = %q, want %q", gotPath, want)
+		}
+	})
+}
+
 func TestGetInvoiceDecodesTheLifecycleFields(t *testing.T) {
 	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("expand") != "lines" {

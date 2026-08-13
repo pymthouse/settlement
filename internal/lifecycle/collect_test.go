@@ -88,3 +88,106 @@ func TestHandleCollectRequestUnparseableBodyIsPermanent(t *testing.T) {
 		t.Errorf("malformed body should be a permanent failure, got %v", err)
 	}
 }
+
+// A forced ("collect now") request must aggressively push the freshly raised
+// invoice past both the collection period and OpenMeter's approval delay, the
+// same as pymthouse's own /billing/collect endpoint did before this raise
+// moved into settlement.
+func TestHandleCollectRequestForcePushesPastCollectionAndApproval(t *testing.T) {
+	om, sc := newFakeOpenMeter(t), newFakeStripe(t)
+	om.setInvoicePendingLinesResult([]openmeter.InvoicePendingLinesResult{{ID: "inv_om_1"}})
+	settler := newTestSettler(t, om, sc, nil)
+
+	_, err := settler.HandleCollectRequest(context.Background(), collectRequestBody(t, CollectRequest{
+		CustomerID: "cus_om_1",
+		RequestID:  "req_1",
+		Force:      true,
+	}))
+	if err != nil {
+		t.Fatalf("HandleCollectRequest: %v", err)
+	}
+
+	if calls := om.snapshotCallsSeen(); len(calls) != 1 || calls[0] != "inv_om_1" {
+		t.Errorf("snapshot calls = %v, want one call for inv_om_1", calls)
+	}
+	if calls := om.advanceCallsSeen(); len(calls) != 1 || calls[0] != "inv_om_1" {
+		t.Errorf("advance calls = %v, want one call for inv_om_1", calls)
+	}
+	if calls := om.approveCallsSeen(); len(calls) != 1 || calls[0] != "inv_om_1" {
+		t.Errorf("approve calls = %v, want one call for inv_om_1", calls)
+	}
+}
+
+// The automatic mid-cycle trigger (force=false) only nudges with Advance —
+// snapshot and approve are reserved for an explicit collect-now, same
+// distinction pymthouse's old advanceInvoice made.
+func TestHandleCollectRequestWithoutForceOnlyAdvances(t *testing.T) {
+	om, sc := newFakeOpenMeter(t), newFakeStripe(t)
+	om.setInvoicePendingLinesResult([]openmeter.InvoicePendingLinesResult{{ID: "inv_om_1"}})
+	settler := newTestSettler(t, om, sc, nil)
+
+	_, err := settler.HandleCollectRequest(context.Background(), collectRequestBody(t, CollectRequest{
+		CustomerID: "cus_om_1",
+		RequestID:  "req_1",
+		Force:      false,
+	}))
+	if err != nil {
+		t.Fatalf("HandleCollectRequest: %v", err)
+	}
+
+	if calls := om.advanceCallsSeen(); len(calls) != 1 || calls[0] != "inv_om_1" {
+		t.Errorf("advance calls = %v, want one call for inv_om_1", calls)
+	}
+	if len(om.snapshotCallsSeen()) != 0 {
+		t.Error("a non-forced request must not snapshot")
+	}
+	if len(om.approveCallsSeen()) != 0 {
+		t.Error("a non-forced request must not approve")
+	}
+}
+
+// A snapshot failure (invoice already past the snapshot-able window) must
+// not block Advance from still being attempted, and must not fail the whole
+// request — this is routine, not exceptional.
+func TestHandleCollectRequestSnapshotFailureDoesNotBlockAdvance(t *testing.T) {
+	om, sc := newFakeOpenMeter(t), newFakeStripe(t)
+	om.setInvoicePendingLinesResult([]openmeter.InvoicePendingLinesResult{{ID: "inv_om_1"}})
+	om.setSnapshotFails(true)
+	settler := newTestSettler(t, om, sc, nil)
+
+	_, err := settler.HandleCollectRequest(context.Background(), collectRequestBody(t, CollectRequest{
+		CustomerID: "cus_om_1",
+		RequestID:  "req_1",
+		Force:      true,
+	}))
+	if err != nil {
+		t.Fatalf("a snapshot failure must not surface as an error: %v", err)
+	}
+	if calls := om.advanceCallsSeen(); len(calls) != 1 || calls[0] != "inv_om_1" {
+		t.Errorf("advance calls = %v, want one call despite the snapshot failure", calls)
+	}
+	if calls := om.approveCallsSeen(); len(calls) != 1 || calls[0] != "inv_om_1" {
+		t.Errorf("approve calls = %v, want one call despite the snapshot failure", calls)
+	}
+}
+
+// Multiple invoices from one raise (a currency split, for example) must each
+// get the same post-raise nudging.
+func TestHandleCollectRequestNudgesEveryRaisedInvoice(t *testing.T) {
+	om, sc := newFakeOpenMeter(t), newFakeStripe(t)
+	om.setInvoicePendingLinesResult([]openmeter.InvoicePendingLinesResult{{ID: "inv_om_1"}, {ID: "inv_om_2"}})
+	settler := newTestSettler(t, om, sc, nil)
+
+	_, err := settler.HandleCollectRequest(context.Background(), collectRequestBody(t, CollectRequest{
+		CustomerID: "cus_om_1",
+		RequestID:  "req_1",
+		Force:      true,
+	}))
+	if err != nil {
+		t.Fatalf("HandleCollectRequest: %v", err)
+	}
+
+	if calls := om.advanceCallsSeen(); len(calls) != 2 {
+		t.Errorf("advance calls = %v, want one per raised invoice", calls)
+	}
+}

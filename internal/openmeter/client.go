@@ -293,6 +293,38 @@ func (c *Client) InvoicePendingLines(ctx context.Context, customerID string) ([]
 	return out, nil
 }
 
+// SnapshotQuantities freezes a freshly raised invoice's usage-based line
+// quantities. It only succeeds while the invoice is still in a
+// snapshot-able state (e.g. draft.waiting_for_collection); calling it after
+// that window has passed is expected to fail and callers should treat that
+// as a no-op, not an error worth surfacing.
+//
+// POST /api/v1/billing/invoices/{invoiceId}/snapshot-quantities
+func (c *Client) SnapshotQuantities(ctx context.Context, invoiceID string) error {
+	path := fmt.Sprintf("/api/v1/billing/invoices/%s/snapshot-quantities", url.PathEscape(invoiceID))
+	return c.post(ctx, "snapshot_quantities", path, nil)
+}
+
+// Advance nudges an invoice through whatever automatic transition it is
+// currently waiting on. With auto_advance and a zero collection period this
+// is frequently a no-op — the invoice may already be past the state Advance
+// would move it from — so a failure here is routine, not exceptional.
+//
+// POST /api/v1/billing/invoices/{invoiceId}/advance
+func (c *Client) Advance(ctx context.Context, invoiceID string) error {
+	path := fmt.Sprintf("/api/v1/billing/invoices/%s/advance", url.PathEscape(invoiceID))
+	return c.post(ctx, "advance_invoice", path, nil)
+}
+
+// Approve skips draft.waiting_auto_approval so a force-collected invoice can
+// issue immediately instead of waiting for OpenMeter's own approval delay.
+//
+// POST /api/v1/billing/invoices/{invoiceId}/approve
+func (c *Client) Approve(ctx context.Context, invoiceID string) error {
+	path := fmt.Sprintf("/api/v1/billing/invoices/%s/approve", url.PathEscape(invoiceID))
+	return c.post(ctx, "approve_invoice", path, nil)
+}
+
 func (c *Client) ListInvoices(ctx context.Context, in ListInvoicesInput) (*InvoiceList, error) {
 	q := url.Values{}
 	for _, s := range in.Statuses {

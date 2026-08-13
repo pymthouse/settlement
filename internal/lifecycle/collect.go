@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/pymthouse/settlement/internal/faults"
 	"github.com/pymthouse/settlement/internal/metrics"
@@ -27,6 +28,12 @@ type CollectRequest struct {
 	// here too purely so log lines can be traced back to the originating
 	// pymthouse decision.
 	RequestID string `json:"requestId"`
+	// Force marks an explicit "collect now" (pymthouse's /billing/collect
+	// endpoint) as opposed to the automatic mid-cycle trigger. It decides how
+	// hard we push a freshly raised invoice past OpenMeter's own collection
+	// period and approval delay: see the snapshot/advance/approve sequence
+	// below.
+	Force bool `json:"force"`
 }
 
 // HandleCollectRequest processes one raw collect-request body.
@@ -66,9 +73,43 @@ func (s *Settler) HandleCollectRequest(ctx context.Context, raw []byte) (string,
 		return HandlerCollectRequest, err
 	}
 
+	for _, result := range results {
+		invoiceID := strings.TrimSpace(result.ID)
+		if invoiceID == "" {
+			continue
+		}
+		s.pushPastCollectionWindow(ctx, invoiceID, req.Force)
+	}
+
 	metrics.InvoiceStateTransitions.WithLabelValues(HandlerCollectRequest, "ok").Inc()
 	s.log.Info("invoiced pending lines",
 		"client_id", req.ClientID, "external_user_id", req.ExternalUserID,
 		"customer_id", req.CustomerID, "invoices_raised", len(results))
 	return HandlerCollectRequest, nil
+}
+
+// pushPastCollectionWindow mirrors what pymthouse used to do the moment it
+// raised an invoice, moved here with the raise itself. With auto_advance and
+// a zero collection period Advance is frequently a no-op — the invoice may
+// already be past the state it would move it from — so failures here are
+// routine and only logged, never surfaced to the caller: the worst case is
+// settlement's normal draft-sync webhook handling picks up the advance a
+// little later instead of immediately.
+func (s *Settler) pushPastCollectionWindow(ctx context.Context, invoiceID string, force bool) {
+	if force {
+		// Native way to skip the collection period for an invoice parked in
+		// draft.waiting_for_collection.
+		if err := s.om.SnapshotQuantities(ctx, invoiceID); err != nil {
+			s.log.Info("collect request: snapshot skipped", "invoice_id", invoiceID, "error", err)
+		}
+	}
+	if err := s.om.Advance(ctx, invoiceID); err != nil {
+		s.log.Info("collect request: advance skipped", "invoice_id", invoiceID, "error", err)
+	}
+	if force {
+		// Skip draft.waiting_auto_approval so settlement can issue immediately.
+		if err := s.om.Approve(ctx, invoiceID); err != nil {
+			s.log.Info("collect request: approve skipped", "invoice_id", invoiceID, "error", err)
+		}
+	}
 }

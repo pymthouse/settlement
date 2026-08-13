@@ -120,6 +120,12 @@ type fakeOpenMeter struct {
 	// invoicePendingLinesCalls records every customerId this fake was asked
 	// to raise, in call order.
 	invoicePendingLinesCalls []string
+	// snapshotCalls, advanceCalls, approveCalls record every invoiceId these
+	// post-raise nudges were called with, in call order.
+	snapshotCalls, advanceCalls, approveCalls []string
+	// snapshotFails makes snapshot-quantities answer 400, simulating an
+	// invoice that is no longer in a snapshot-able state.
+	snapshotFails bool
 }
 
 func newFakeOpenMeter(t *testing.T) *fakeOpenMeter {
@@ -142,6 +148,9 @@ func newFakeOpenMeter(t *testing.T) *fakeOpenMeter {
 	mux.HandleFunc("POST /api/v1/apps/custom-invoicing/{id}/issuing/synchronized", f.issuingSynchronized)
 	mux.HandleFunc("POST /api/v1/apps/custom-invoicing/{id}/payment/status", f.paymentStatus)
 	mux.HandleFunc("POST /api/v1/billing/invoices/invoice", f.invoicePendingLines)
+	mux.HandleFunc("POST /api/v1/billing/invoices/{id}/snapshot-quantities", f.snapshotQuantities)
+	mux.HandleFunc("POST /api/v1/billing/invoices/{id}/advance", f.advanceInvoice)
+	mux.HandleFunc("POST /api/v1/billing/invoices/{id}/approve", f.approveInvoice)
 
 	f.server = httptest.NewServer(mux)
 	t.Cleanup(f.server.Close)
@@ -268,6 +277,34 @@ func (f *fakeOpenMeter) invoicePendingLines(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, f.invoicePendingLinesResult)
 }
 
+func (f *fakeOpenMeter) snapshotQuantities(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.snapshotCalls = append(f.snapshotCalls, r.PathValue("id"))
+	if f.snapshotFails {
+		http.Error(w, `{"message":"invoice is not in a snapshot-able state"}`, http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (f *fakeOpenMeter) advanceInvoice(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.advanceCalls = append(f.advanceCalls, r.PathValue("id"))
+	w.WriteHeader(http.StatusOK)
+}
+
+func (f *fakeOpenMeter) approveInvoice(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.approveCalls = append(f.approveCalls, r.PathValue("id"))
+	w.WriteHeader(http.StatusOK)
+}
+
 func (f *fakeOpenMeter) draftFor(t *testing.T, invoiceID string) openmeter.DraftSynchronizedRequest {
 	t.Helper()
 	f.mu.Lock()
@@ -314,6 +351,30 @@ func (f *fakeOpenMeter) invoicePendingLinesCallsSeen() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.invoicePendingLinesCalls...)
+}
+
+func (f *fakeOpenMeter) snapshotCallsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.snapshotCalls...)
+}
+
+func (f *fakeOpenMeter) advanceCallsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.advanceCalls...)
+}
+
+func (f *fakeOpenMeter) approveCallsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.approveCalls...)
+}
+
+func (f *fakeOpenMeter) setSnapshotFails(fails bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.snapshotFails = fails
 }
 
 // newTestSettler wires a Settler against both fakes.
