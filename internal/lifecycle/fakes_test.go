@@ -46,6 +46,10 @@ func (f *fakeStripe) FailNext(path string, count int) {
 	f.inner.FailNext(path, count)
 }
 
+func (f *fakeStripe) OmitPaymentOnFinalize(count int) {
+	f.inner.OmitPaymentOnFinalize(count)
+}
+
 func (f *fakeStripe) SetInvoiceStatus(id, status string) {
 	f.inner.SetInvoiceStatus(id, status)
 }

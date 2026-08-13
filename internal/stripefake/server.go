@@ -103,6 +103,13 @@ type Server struct {
 	idempotencyIndex map[string]string
 	nextID           int
 	client           *http.Client
+
+	// omitPaymentOnFinalize simulates Stripe's real, observed behavior of
+	// finalizing an invoice before its PaymentIntent is attached for
+	// automatic collection: the next N finalize calls succeed (status
+	// "open") but leave Payments unset, so PrimaryPaymentIntent() fails
+	// exactly as it does against the real API during that window.
+	omitPaymentOnFinalize int
 }
 
 // New builds a fake Stripe server.
@@ -155,6 +162,16 @@ func (s *Server) FailNext(path string, count int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failNext[path] = count
+}
+
+// OmitPaymentOnFinalize makes the next `count` invoice finalizations
+// succeed without attaching a PaymentIntent, reproducing the brief real-world
+// window where Stripe's automatic-collection PaymentIntent is not yet
+// attached immediately after finalize.
+func (s *Server) OmitPaymentOnFinalize(count int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.omitPaymentOnFinalize = count
 }
 
 // SetInvoiceStatus changes an invoice's status in place.
@@ -469,6 +486,16 @@ func (s *Server) finalizeInvoice(w http.ResponseWriter, r *http.Request) {
 
 	invoice.Status = "open"
 	invoice.Number = "STRIPE-" + strings.ToUpper(invoice.ID)
+
+	if s.omitPaymentOnFinalize > 0 {
+		s.omitPaymentOnFinalize--
+		s.retotalLocked(invoice)
+		out := invoice
+		s.mu.Unlock()
+		writeJSON(w, out)
+		return
+	}
+
 	paymentID := s.id("pi")
 	s.paymentIDs[invoice.ID] = paymentID
 	s.paymentIntents[paymentID] = &stripe.PaymentIntent{

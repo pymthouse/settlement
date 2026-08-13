@@ -128,8 +128,16 @@ func (s *Settler) issuingSync(ctx context.Context, inv *openmeter.Invoice) error
 			s.log.Info("using stripe invoice as payment reference for zero-amount invoice",
 				"invoice_id", inv.ID, "stripe_invoice", stripeInvoice.ID)
 		} else {
-			return faults.Permanentf("missing_payment_reference",
-				"invoice %s: finalized stripe invoice %s has no payment reference: %v",
+			// Not permanent: for automatic collection, Stripe attaches the
+			// PaymentIntent asynchronously just after finalize, and the
+			// single re-read above is not always enough to catch it —
+			// observed in practice landing in the DLQ within a couple of
+			// seconds of finalizing, well before Stripe had attached
+			// anything to retry against. Letting the normal retry ladder
+			// (backoff up to ~60s, see SETTLEMENT_RETRY_*) run gives that
+			// window time to close; the reconciliation sweep is still the
+			// backstop if it genuinely never arrives.
+			return fmt.Errorf("invoice %s: finalized stripe invoice %s has no payment reference yet: %w",
 				inv.ID, stripeInvoice.ID, err)
 		}
 	}
