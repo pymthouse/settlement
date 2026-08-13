@@ -96,6 +96,9 @@ func konnectNeedsMeteringV1(path, method string) bool {
 	if method == http.MethodGet && strings.HasPrefix(pathOnly, "/billing/invoices") {
 		return true
 	}
+	if method == http.MethodPost && pathOnly == "/billing/invoices/invoice" {
+		return true
+	}
 	if method == http.MethodGet && strings.HasPrefix(pathOnly, "/customers/") {
 		return true
 	}
@@ -251,6 +254,45 @@ type InvoiceList struct {
 }
 
 // ListInvoices pages through invoices for the reconciliation sweep.
+// InvoicePendingLinesResult is one invoice OpenMeter created from a
+// customer's pending gathering lines.
+type InvoicePendingLinesResult struct {
+	ID string `json:"id"`
+}
+
+// ErrRealizationRunActive means the customer already has an unresolved
+// invoicing attempt in flight. Not a failure of this call — the prior one has
+// simply not finalized (commonly: it is waiting on a payment-status report we
+// have not sent yet). Retrying immediately will hit the identical error;
+// callers should treat this as a no-op, not a permanent failure.
+var ErrRealizationRunActive = errors.New("openmeter: active realization run already exists for this customer")
+
+// InvoicePendingLines promotes a customer's gathering lines into a real
+// invoice. This is the one OpenMeter write settlement makes that *raises* an
+// invoice rather than driving one that already exists — ownership of "when do
+// we invoice" still lives in pymthouse (soft-negative ceiling, lead window);
+// this only executes a raise pymthouse has already decided is due, through
+// the same per-customer lane ordering every other handler gets, so a second
+// request for a customer already mid-raise waits its turn instead of racing
+// the first one on Konnect's side.
+func (c *Client) InvoicePendingLines(ctx context.Context, customerID string) ([]InvoicePendingLinesResult, error) {
+	var out []InvoicePendingLinesResult
+	body := struct {
+		CustomerID                 string `json:"customerId"`
+		ProgressiveBillingOverride bool   `json:"progressiveBillingOverride"`
+	}{CustomerID: customerID, ProgressiveBillingOverride: true}
+	err := c.do(ctx, "invoice_pending_lines", http.MethodPost, "/api/v1/billing/invoices/invoice", body, &out)
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest &&
+			strings.Contains(strings.ToLower(apiErr.Body), "active realization run already exists") {
+			return nil, ErrRealizationRunActive
+		}
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *Client) ListInvoices(ctx context.Context, in ListInvoicesInput) (*InvoiceList, error) {
 	q := url.Values{}
 	for _, s := range in.Statuses {

@@ -48,6 +48,10 @@ func (f *fakeSettler) HandleStripeEvent(context.Context, []byte) (string, error)
 	return lifecycle.HandlerPaymentStatus, f.next()
 }
 
+func (f *fakeSettler) HandleCollectRequest(context.Context, []byte) (string, error) {
+	return lifecycle.HandlerCollectRequest, f.next()
+}
+
 func (f *fakeSettler) attempts() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -158,6 +162,28 @@ func TestProcessSettlesAndKeepsTheClaim(t *testing.T) {
 	// The claim must survive success, so a redelivery is suppressed.
 	if won, _ := claims.Claim(context.Background(), "openmeter:evt_1"); won {
 		t.Error("the claim was released after success; a redelivery would reprocess the event")
+	}
+}
+
+// A pymthouse collect request must reach HandleCollectRequest through the
+// same dispatch, dedupe and DLQ machinery every other source gets — it has
+// no bespoke path.
+func TestProcessDispatchesCollectRequest(t *testing.T) {
+	settler := &fakeSettler{}
+	claims := dedupe.NewMemory(time.Hour)
+	dlq := &fakeDLQ{}
+	runner, halted := testRunner(t, settler, claims, dlq, nil)
+
+	runner.process(context.Background(), eventMessage(events.SourceCollectRequest, "req_1"))
+
+	if settler.attempts() != 1 {
+		t.Errorf("handler ran %d times, want 1", settler.attempts())
+	}
+	if dlq.count() != 0 {
+		t.Error("a successful collect request was dead-lettered")
+	}
+	if *halted {
+		t.Error("the worker halted on a successful collect request")
 	}
 }
 

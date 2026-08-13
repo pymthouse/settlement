@@ -27,6 +27,7 @@ const (
 	testStripeSecret = "whsec_producer_test"
 	// Synthetic fixture only — not a real webhook secret.
 	testStandardSecret = "whsec_c2V0dGxlbWVudC10ZXN0LWhtYWMta2V5LXYx"
+	testCollectSecret  = "collect_producer_test_secret"
 )
 
 // recordingPublisher captures what the doorman would have written to Kafka.
@@ -71,10 +72,12 @@ func newTestServer(t *testing.T, publisher Publisher) http.Handler {
 		StripeToleranceSeconds:  300,
 		OpenMeterWebhookSecrets: []string{testStandardSecret},
 		OpenMeterToleranceSecs:  300,
+		CollectRequestSecrets:   []string{testCollectSecret},
 		Kafka: config.Kafka{
-			TopicStripe:    "billing.stripe.events.v1",
-			TopicOpenMeter: "billing.openmeter.invoices.v1",
-			WriteTimeout:   5 * time.Second,
+			TopicStripe:         "billing.stripe.events.v1",
+			TopicOpenMeter:      "billing.openmeter.invoices.v1",
+			TopicCollectRequest: "billing.collect.requests.v1",
+			WriteTimeout:        5 * time.Second,
 		},
 	}
 	return New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), publisher).Routes()
@@ -202,6 +205,91 @@ func TestOpenMeterWebhookAcceptsSvixHeaderNames(t *testing.T) {
 	}
 	if publisher.count() != 1 {
 		t.Error("nothing was published")
+	}
+}
+
+func TestCollectRequestIsVerifiedAndPublished(t *testing.T) {
+	publisher := &recordingPublisher{}
+	server := newTestServer(t, publisher)
+
+	body := `{"clientId":"client_1","externalUserId":"eu_1","customerId":"cus_om_1","requestId":"req_1"}`
+	req := httptest.NewRequest(http.MethodPost, "/requests/collect", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testCollectSecret)
+
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	msg := publisher.only(t)
+	if msg.Topic != "billing.collect.requests.v1" {
+		t.Errorf("topic = %q", msg.Topic)
+	}
+	if string(msg.Key) != "cus_om_1" {
+		t.Errorf("partition key = %q, want the OpenMeter customer id so this lands in that customer's lane", string(msg.Key))
+	}
+	if string(msg.Value) != body {
+		t.Error("the published value must be the raw, unmodified body")
+	}
+}
+
+func TestCollectRequestRejectsWrongSecret(t *testing.T) {
+	publisher := &recordingPublisher{}
+	server := newTestServer(t, publisher)
+
+	req := httptest.NewRequest(http.MethodPost, "/requests/collect",
+		strings.NewReader(`{"customerId":"cus_om_1","requestId":"req_1"}`))
+	req.Header.Set("Authorization", "Bearer wrong_secret")
+
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+	if publisher.count() != 0 {
+		t.Error("a request with the wrong secret was published")
+	}
+}
+
+func TestCollectRequestWithoutAuthorizationHeaderIsRejected(t *testing.T) {
+	publisher := &recordingPublisher{}
+	server := newTestServer(t, publisher)
+
+	req := httptest.NewRequest(http.MethodPost, "/requests/collect",
+		strings.NewReader(`{"customerId":"cus_om_1","requestId":"req_1"}`))
+
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+	if publisher.count() != 0 {
+		t.Error("an unauthenticated request was published")
+	}
+}
+
+// Without a configured secret there is no boundary, same as the two webhook
+// endpoints: refuse rather than forward an unverifiable request.
+func TestCollectRequestEndpointRefusesTrafficWhenUnconfigured(t *testing.T) {
+	publisher := &recordingPublisher{}
+	cfg := config.Producer{
+		MaxBodyBytes: 1 << 20,
+		Kafka:        config.Kafka{TopicCollectRequest: "t", WriteTimeout: time.Second},
+	}
+	server := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), publisher).Routes()
+
+	req := httptest.NewRequest(http.MethodPost, "/requests/collect", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer anything")
+
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rec.Code)
 	}
 }
 

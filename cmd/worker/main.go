@@ -68,8 +68,8 @@ func run() int {
 		}
 	}()
 
-	readers := make(map[string]*kafka.Reader, 2)
-	for _, topic := range []string{cfg.Kafka.TopicOpenMeter, cfg.Kafka.TopicStripe} {
+	readers := make(map[string]*kafka.Reader, 3)
+	for _, topic := range []string{cfg.Kafka.TopicOpenMeter, cfg.Kafka.TopicStripe, cfg.Kafka.TopicCollectRequest} {
 		reader, err := kafkax.NewReader(cfg.Kafka, topic, cfg.StartOffset)
 		if err != nil {
 			log.Error("kafka reader", "topic", topic, "error", err)

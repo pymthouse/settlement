@@ -112,6 +112,14 @@ type fakeOpenMeter struct {
 	alreadyPaidOn bool
 	// listPages is what ListInvoices returns.
 	listPages []openmeter.Invoice
+	// realizationRunActive makes invoice-pending-lines answer Konnect's
+	// stuck-invoice 400 instead of succeeding.
+	realizationRunActive bool
+	// invoicePendingLinesResult is what a successful raise returns.
+	invoicePendingLinesResult []openmeter.InvoicePendingLinesResult
+	// invoicePendingLinesCalls records every customerId this fake was asked
+	// to raise, in call order.
+	invoicePendingLinesCalls []string
 }
 
 func newFakeOpenMeter(t *testing.T) *fakeOpenMeter {
@@ -133,6 +141,7 @@ func newFakeOpenMeter(t *testing.T) *fakeOpenMeter {
 	mux.HandleFunc("POST /api/v1/apps/custom-invoicing/{id}/draft/synchronized", f.draftSync)
 	mux.HandleFunc("POST /api/v1/apps/custom-invoicing/{id}/issuing/synchronized", f.issuingSynchronized)
 	mux.HandleFunc("POST /api/v1/apps/custom-invoicing/{id}/payment/status", f.paymentStatus)
+	mux.HandleFunc("POST /api/v1/billing/invoices/invoice", f.invoicePendingLines)
 
 	f.server = httptest.NewServer(mux)
 	t.Cleanup(f.server.Close)
@@ -241,6 +250,24 @@ func (f *fakeOpenMeter) paymentStatus(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+func (f *fakeOpenMeter) invoicePendingLines(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		CustomerID string `json:"customerId"`
+	}
+	decode(r, &body)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.invoicePendingLinesCalls = append(f.invoicePendingLinesCalls, body.CustomerID)
+
+	if f.realizationRunActive {
+		http.Error(w, `{"message":"an active realization run already exists for this customer"}`, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, f.invoicePendingLinesResult)
+}
+
 func (f *fakeOpenMeter) draftFor(t *testing.T, invoiceID string) openmeter.DraftSynchronizedRequest {
 	t.Helper()
 	f.mu.Lock()
@@ -269,6 +296,24 @@ func (f *fakeOpenMeter) triggersFor(invoiceID string) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.paymentTriggers[invoiceID]...)
+}
+
+func (f *fakeOpenMeter) setRealizationRunActive(active bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.realizationRunActive = active
+}
+
+func (f *fakeOpenMeter) setInvoicePendingLinesResult(results []openmeter.InvoicePendingLinesResult) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.invoicePendingLinesResult = results
+}
+
+func (f *fakeOpenMeter) invoicePendingLinesCallsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.invoicePendingLinesCalls...)
 }
 
 // newTestSettler wires a Settler against both fakes.

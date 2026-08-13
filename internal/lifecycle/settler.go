@@ -18,10 +18,11 @@ import (
 
 // Handler names, used for metrics labels and log fields.
 const (
-	HandlerDraftSync     = "draft_sync"
-	HandlerIssuingSync   = "issuing_sync"
-	HandlerPaymentStatus = "payment_status"
-	HandlerNoop          = "noop"
+	HandlerDraftSync      = "draft_sync"
+	HandlerIssuingSync    = "issuing_sync"
+	HandlerPaymentStatus  = "payment_status"
+	HandlerCollectRequest = "collect_request"
+	HandlerNoop           = "noop"
 )
 
 // Settler drives invoices through the Custom Invoicing lifecycle.

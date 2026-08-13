@@ -64,6 +64,12 @@ type Kafka struct {
 	TopicOpenMeter string
 	// TopicDLQ receives messages that exhausted their retries.
 	TopicDLQ string
+	// TopicCollectRequest carries verified pymthouse "raise this customer now"
+	// requests. Separate from TopicOpenMeter even though both ultimately raise
+	// invoices — one is a third-party notification, the other pymthouse's own
+	// business decision, and conflating them would make the audit trail read
+	// as if OpenMeter asked for something it never did.
+	TopicCollectRequest string
 	// ConsumerGroup is the worker's Kafka consumer group id.
 	ConsumerGroup string
 
@@ -95,6 +101,14 @@ type Producer struct {
 	// (Standard Webhooks / Svix format, optionally whsec_ prefixed).
 	OpenMeterWebhookSecrets []string
 	OpenMeterToleranceSecs  int64
+
+	// CollectRequestSecrets authenticate pymthouse's own "raise this customer
+	// now" requests. Not a webhook signature — pymthouse is a known first
+	// party, not a third-party provider — but still a list so it can be
+	// rotated without dropping a request. Compared with plain constant-time
+	// equality, not HMAC'd over a body, since pymthouse is not signing a
+	// payload it wants replay-verified months later the way Stripe does.
+	CollectRequestSecrets []string
 
 	Kafka Kafka
 }
@@ -215,6 +229,7 @@ func LoadProducer() (Producer, error) {
 		StripeToleranceSeconds:  int64(envInt("SETTLEMENT_STRIPE_TOLERANCE_SECONDS", 300, &errs)),
 		OpenMeterWebhookSecrets: envList("SETTLEMENT_OPENMETER_WEBHOOK_SECRETS"),
 		OpenMeterToleranceSecs:  int64(envInt("SETTLEMENT_OPENMETER_TOLERANCE_SECONDS", 300, &errs)),
+		CollectRequestSecrets:   envList("SETTLEMENT_COLLECT_REQUEST_SECRETS"),
 		Kafka:                   loadKafka(&errs),
 	}
 
@@ -346,18 +361,19 @@ func LoadWorker() (Worker, error) {
 
 func loadKafka(errs *[]error) Kafka {
 	k := Kafka{
-		Brokers:        envListDefault("SETTLEMENT_KAFKA_BROKERS", []string{"localhost:9092"}),
-		TopicStripe:    env("SETTLEMENT_KAFKA_TOPIC_STRIPE", "billing.stripe.events.v1"),
-		TopicOpenMeter: env("SETTLEMENT_KAFKA_TOPIC_OPENMETER", "billing.openmeter.invoices.v1"),
-		TopicDLQ:       env("SETTLEMENT_KAFKA_TOPIC_DLQ", "billing.settlement.dlq.v1"),
-		ConsumerGroup:  env("SETTLEMENT_KAFKA_CONSUMER_GROUP", "settlement-worker"),
-		SASLMechanism:  strings.ToLower(env("SETTLEMENT_KAFKA_SASL_MECHANISM", "")),
-		SASLUsername:   env("SETTLEMENT_KAFKA_SASL_USERNAME", ""),
-		SASLPassword:   env("SETTLEMENT_KAFKA_SASL_PASSWORD", ""),
-		TLSEnabled:     envBool("SETTLEMENT_KAFKA_TLS", false, errs),
-		RequiredAcks:   envInt("SETTLEMENT_KAFKA_REQUIRED_ACKS", -1, errs),
-		WriteTimeout:   envDuration("SETTLEMENT_KAFKA_WRITE_TIMEOUT", 10*time.Second, errs),
-		DialTimeout:    envDuration("SETTLEMENT_KAFKA_DIAL_TIMEOUT", 10*time.Second, errs),
+		Brokers:             envListDefault("SETTLEMENT_KAFKA_BROKERS", []string{"localhost:9092"}),
+		TopicStripe:         env("SETTLEMENT_KAFKA_TOPIC_STRIPE", "billing.stripe.events.v1"),
+		TopicOpenMeter:      env("SETTLEMENT_KAFKA_TOPIC_OPENMETER", "billing.openmeter.invoices.v1"),
+		TopicDLQ:            env("SETTLEMENT_KAFKA_TOPIC_DLQ", "billing.settlement.dlq.v1"),
+		TopicCollectRequest: env("SETTLEMENT_KAFKA_TOPIC_COLLECT_REQUEST", "billing.collect.requests.v1"),
+		ConsumerGroup:       env("SETTLEMENT_KAFKA_CONSUMER_GROUP", "settlement-worker"),
+		SASLMechanism:       strings.ToLower(env("SETTLEMENT_KAFKA_SASL_MECHANISM", "")),
+		SASLUsername:        env("SETTLEMENT_KAFKA_SASL_USERNAME", ""),
+		SASLPassword:        env("SETTLEMENT_KAFKA_SASL_PASSWORD", ""),
+		TLSEnabled:          envBool("SETTLEMENT_KAFKA_TLS", false, errs),
+		RequiredAcks:        envInt("SETTLEMENT_KAFKA_REQUIRED_ACKS", -1, errs),
+		WriteTimeout:        envDuration("SETTLEMENT_KAFKA_WRITE_TIMEOUT", 10*time.Second, errs),
+		DialTimeout:         envDuration("SETTLEMENT_KAFKA_DIAL_TIMEOUT", 10*time.Second, errs),
 	}
 	switch k.SASLMechanism {
 	case "", "plain", "scram-sha-256", "scram-sha-512":

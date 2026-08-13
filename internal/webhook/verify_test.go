@@ -251,3 +251,56 @@ func TestStandardVerifierAcceptsBothBase64Interpretations(t *testing.T) {
 		t.Fatalf("raw-string interpretation rejected: %v", err)
 	}
 }
+
+func TestSharedSecretVerifierAcceptsConfiguredSecret(t *testing.T) {
+	v := NewSharedSecretVerifier([]string{"collect_secret_a"})
+	if !v.Enabled() {
+		t.Fatal("Enabled() = false with a configured secret")
+	}
+	if err := v.Verify("collect_secret_a"); err != nil {
+		t.Fatalf("genuine secret rejected: %v", err)
+	}
+}
+
+func TestSharedSecretVerifierRejectsWrongSecret(t *testing.T) {
+	v := NewSharedSecretVerifier([]string{"collect_secret_a"})
+	if err := v.Verify("collect_secret_b"); !errors.Is(err, ErrNoMatch) {
+		t.Fatalf("err = %v, want ErrNoMatch", err)
+	}
+}
+
+func TestSharedSecretVerifierRejectsEmptyPresented(t *testing.T) {
+	v := NewSharedSecretVerifier([]string{"collect_secret_a"})
+	if err := v.Verify(""); !errors.Is(err, ErrInvalidHeader) {
+		t.Fatalf("err = %v, want ErrInvalidHeader", err)
+	}
+}
+
+// Rotation must work the same way it does for the provider verifiers: add
+// the new secret alongside the old one, and both validate until the old
+// callers (pymthouse deploys) have moved on to the new value.
+func TestSharedSecretVerifierSupportsSecretRotation(t *testing.T) {
+	v := NewSharedSecretVerifier([]string{"collect_secret_old", "collect_secret_new"})
+	if err := v.Verify("collect_secret_old"); err != nil {
+		t.Errorf("old secret rejected during rotation: %v", err)
+	}
+	if err := v.Verify("collect_secret_new"); err != nil {
+		t.Errorf("new secret rejected during rotation: %v", err)
+	}
+}
+
+func TestSharedSecretVerifierWithoutSecretsRefusesEverything(t *testing.T) {
+	v := NewSharedSecretVerifier(nil)
+	if v.Enabled() {
+		t.Fatal("Enabled() = true with no secrets configured")
+	}
+	if err := v.Verify("anything"); !errors.Is(err, ErrNoMatch) {
+		t.Fatalf("err = %v, want ErrNoMatch", err)
+	}
+	// Blank entries (e.g. an unset env var split into a one-element slice of
+	// "") must not count as a configured secret either.
+	v = NewSharedSecretVerifier([]string{"", "  "})
+	if v.Enabled() {
+		t.Fatal("Enabled() = true with only blank secrets configured")
+	}
+}

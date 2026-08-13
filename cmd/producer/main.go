@@ -58,6 +58,8 @@ func main() {
 			"brokers", cfg.Kafka.Brokers,
 			"stripe_topic", cfg.Kafka.TopicStripe,
 			"openmeter_topic", cfg.Kafka.TopicOpenMeter,
+			"collect_request_topic", cfg.Kafka.TopicCollectRequest,
+			"collect_requests_enabled", len(cfg.CollectRequestSecrets) > 0,
 		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err

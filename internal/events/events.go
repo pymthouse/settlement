@@ -19,6 +19,13 @@ import (
 const (
 	SourceStripe    = "stripe"
 	SourceOpenMeter = "openmeter"
+	// SourceCollectRequest marks a pymthouse-originated request to raise a
+	// customer's pending gathering lines now. Unlike the other two sources
+	// this is not a third-party webhook — the producer verifies it with a
+	// shared secret, not a signature, but it flows through the identical
+	// verify-then-publish path so it gets the same audit trail and the same
+	// per-customer lane ordering as everything else.
+	SourceCollectRequest = "pymthouse"
 )
 
 // Kafka header keys. They are prefixed to avoid colliding with headers added
@@ -184,6 +191,51 @@ func DescribeOpenMeter(raw []byte) (Descriptor, error) {
 	}, nil
 }
 
+// collectRequest is the subset of a pymthouse collect-request body the
+// doorman needs. It mirrors lifecycle.CollectRequest's JSON shape but stays a
+// separate type here — the events package must not import lifecycle.
+type collectRequest struct {
+	ClientID       string `json:"clientId"`
+	ExternalUserID string `json:"externalUserId"`
+	CustomerID     string `json:"customerId"`
+	// RequestID is minted once by pymthouse per raise *decision*, not per
+	// HTTP attempt: reused verbatim if pymthouse retries the same decision,
+	// fresh for the next one. It is the dedupe key. A content hash of the
+	// body was considered instead and rejected — two genuinely separate raise
+	// requests for the same customer (the normal case across a billing cycle)
+	// would carry identical {clientId, externalUserId, customerId} and hash
+	// the same, silently dropping the second as if it were a retry of the
+	// first.
+	RequestID string `json:"requestId"`
+}
+
+// DescribeCollectRequest extracts routing metadata from a raw pymthouse
+// collect-request body.
+//
+// The key is the OpenMeter customer id, same as DescribeOpenMeter — a raise
+// request for a customer must land in the identical lane as that customer's
+// draft/issuing/payment events, or it could run concurrently with one and
+// race it on Konnect's side, which is the exact problem this event exists to
+// avoid.
+func DescribeCollectRequest(raw []byte) (Descriptor, error) {
+	var req collectRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return Descriptor{}, fmt.Errorf("%w: %v", ErrUnparseable, err)
+	}
+	if req.CustomerID == "" {
+		return Descriptor{}, fmt.Errorf("%w: missing customerId", ErrUnparseable)
+	}
+	if req.RequestID == "" {
+		return Descriptor{}, fmt.Errorf("%w: missing requestId", ErrUnparseable)
+	}
+	return Descriptor{
+		Source:       SourceCollectRequest,
+		EventID:      req.RequestID,
+		EventType:    "collect.requested",
+		PartitionKey: req.CustomerID,
+	}, nil
+}
+
 // Describe dispatches to the per-source describer.
 func Describe(source string, raw []byte) (Descriptor, error) {
 	switch source {
@@ -191,6 +243,8 @@ func Describe(source string, raw []byte) (Descriptor, error) {
 		return DescribeStripe(raw)
 	case SourceOpenMeter:
 		return DescribeOpenMeter(raw)
+	case SourceCollectRequest:
+		return DescribeCollectRequest(raw)
 	default:
 		return Descriptor{}, fmt.Errorf("%w: unknown source %q", ErrUnparseable, source)
 	}
