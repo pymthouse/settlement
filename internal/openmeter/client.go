@@ -144,6 +144,50 @@ func IsConflict(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict
 }
 
+// IsAlreadyApplied reports whether err means the payment trigger was already
+// applied (or the invoice is already in a terminal paid state).
+//
+// OpenMeter often returns a non-409 4xx ("already paid") instead of 409;
+// treating those as success stops DLQ spam on webhook redeliveries.
+//
+// Do not match every "no leaving transition" / "trigger_paid" body — a paid
+// trigger refused from issuing.syncing is a sequencing bug, not a no-op.
+func IsAlreadyApplied(err error) bool {
+	if IsConflict(err) {
+		return true
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.StatusCode < 400 || apiErr.StatusCode >= 500 {
+		return false
+	}
+	msg := strings.ToLower(apiErr.Body)
+	if strings.Contains(msg, "issuing.sync") || strings.Contains(msg, "draft.sync") {
+		return false
+	}
+	return strings.Contains(msg, "already paid") ||
+		strings.Contains(msg, "from state 'paid'") ||
+		strings.Contains(msg, `from state "paid"`) ||
+		(strings.Contains(msg, "no leaving transition") && strings.Contains(msg, "already"))
+}
+
+// IsPrematurePaymentTrigger reports whether err means trigger_paid (or similar)
+// arrived before issuing sync completed.
+func IsPrematurePaymentTrigger(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.StatusCode < 400 || apiErr.StatusCode >= 500 {
+		return false
+	}
+	msg := strings.ToLower(apiErr.Body)
+	return strings.Contains(msg, "issuing.sync") &&
+		(strings.Contains(msg, "trigger_paid") || strings.Contains(msg, "paid"))
+}
+
 // DraftSynchronized completes the draft sync hook.
 //
 // POST /api/v1/apps/custom-invoicing/{invoiceId}/draft/synchronized

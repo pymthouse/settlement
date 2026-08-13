@@ -174,6 +174,15 @@ func TestAPIErrorRetryability(t *testing.T) {
 func TestErrorHelpers(t *testing.T) {
 	notFound := &APIError{StatusCode: http.StatusNotFound}
 	conflict := &APIError{StatusCode: http.StatusConflict}
+	alreadyPaid := &APIError{
+		StatusCode: http.StatusBadRequest,
+		Body:       `{"message":"invoice is already paid; no leaving transition for trigger_paid"}`,
+	}
+	premature := &APIError{
+		StatusCode: http.StatusBadRequest,
+		Body:       `{"detail":"No valid leaving transitions are permitted from state 'issuing.syncing' for trigger 'trigger_paid'"}`,
+	}
+	otherBad := &APIError{StatusCode: http.StatusBadRequest, Body: `{"message":"invalid trigger"}`}
 
 	if !IsNotFound(notFound) || IsNotFound(conflict) {
 		t.Error("IsNotFound misclassified an error")
@@ -183,6 +192,18 @@ func TestErrorHelpers(t *testing.T) {
 	}
 	if IsNotFound(nil) || IsConflict(nil) {
 		t.Error("nil should not classify as an API error")
+	}
+	if !IsAlreadyApplied(conflict) || !IsAlreadyApplied(alreadyPaid) {
+		t.Error("IsAlreadyApplied should accept 409 and already-paid 4xx")
+	}
+	if IsAlreadyApplied(premature) {
+		t.Error("IsAlreadyApplied must not swallow premature trigger_paid from issuing.syncing")
+	}
+	if !IsPrematurePaymentTrigger(premature) || IsPrematurePaymentTrigger(alreadyPaid) {
+		t.Error("IsPrematurePaymentTrigger misclassified")
+	}
+	if IsAlreadyApplied(otherBad) || IsAlreadyApplied(nil) {
+		t.Error("IsAlreadyApplied misclassified an unrelated error")
 	}
 }
 

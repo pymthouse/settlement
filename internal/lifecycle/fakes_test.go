@@ -108,6 +108,8 @@ type fakeOpenMeter struct {
 	paymentTriggers   map[string][]string
 	// conflictOn makes a completion endpoint answer 409 once.
 	conflictOn map[string]bool
+	// alreadyPaidOn makes payment/status answer a non-409 already-paid 4xx once.
+	alreadyPaidOn bool
 	// listPages is what ListInvoices returns.
 	listPages []openmeter.Invoice
 }
@@ -227,6 +229,11 @@ func (f *fakeOpenMeter) paymentStatus(w http.ResponseWriter, r *http.Request) {
 	if f.conflictOn["payment"] {
 		f.conflictOn["payment"] = false
 		http.Error(w, `{"message":"already applied"}`, http.StatusConflict)
+		return
+	}
+	if f.alreadyPaidOn {
+		f.alreadyPaidOn = false
+		http.Error(w, `{"message":"invoice is already paid; no leaving transition for trigger_paid"}`, http.StatusBadRequest)
 		return
 	}
 	id := r.PathValue("id")

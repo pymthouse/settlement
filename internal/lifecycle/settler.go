@@ -177,11 +177,34 @@ func (s *Settler) HandleStripeEvent(ctx context.Context, raw []byte) (string, er
 	)
 
 	if err := s.om.UpdatePaymentStatus(ctx, invoiceID, trigger); err != nil {
-		if openmeter.IsConflict(err) {
+		if openmeter.IsAlreadyApplied(err) {
 			// The invoice already moved — a duplicate delivery, or the
 			// reconciler got there first. The desired state holds either way.
 			metrics.InvoiceStateTransitions.WithLabelValues(trigger, "already_applied").Inc()
 			s.log.Info("payment status already applied", "invoice_id", invoiceID, "trigger", trigger)
+			return HandlerPaymentStatus, nil
+		}
+		// Stripe can pay (especially $0 invoices) before issuing sync finishes.
+		// Complete the sync hook, then retry the payment trigger once.
+		if trigger == openmeter.TriggerPaid && openmeter.IsPrematurePaymentTrigger(err) {
+			s.log.Info("payment arrived before issuing sync; completing sync first",
+				"invoice_id", invoiceID)
+			if syncErr := s.completeIssuingBeforePaid(ctx, invoiceID); syncErr != nil {
+				metrics.InvoiceStateTransitions.WithLabelValues(trigger, "error").Inc()
+				return HandlerPaymentStatus, fmt.Errorf(
+					"update payment status %s -> %s (after issuing sync): %w",
+					invoiceID, trigger, syncErr)
+			}
+			if retryErr := s.om.UpdatePaymentStatus(ctx, invoiceID, trigger); retryErr != nil {
+				if openmeter.IsAlreadyApplied(retryErr) {
+					metrics.InvoiceStateTransitions.WithLabelValues(trigger, "already_applied").Inc()
+					return HandlerPaymentStatus, nil
+				}
+				metrics.InvoiceStateTransitions.WithLabelValues(trigger, "error").Inc()
+				return HandlerPaymentStatus, fmt.Errorf(
+					"update payment status %s -> %s: %w", invoiceID, trigger, retryErr)
+			}
+			metrics.InvoiceStateTransitions.WithLabelValues(trigger, "ok").Inc()
 			return HandlerPaymentStatus, nil
 		}
 		metrics.InvoiceStateTransitions.WithLabelValues(trigger, "error").Inc()
@@ -190,6 +213,20 @@ func (s *Settler) HandleStripeEvent(ctx context.Context, raw []byte) (string, er
 
 	metrics.InvoiceStateTransitions.WithLabelValues(trigger, "ok").Inc()
 	return HandlerPaymentStatus, nil
+}
+
+// completeIssuingBeforePaid drives an invoice still parked at issuing.sync so
+// a concurrent Stripe payment_succeeded can then apply trigger_paid.
+func (s *Settler) completeIssuingBeforePaid(ctx context.Context, invoiceID string) error {
+	inv, err := s.om.GetInvoice(ctx, invoiceID)
+	if err != nil {
+		return fmt.Errorf("reload invoice %s: %w", invoiceID, err)
+	}
+	if !matchesAny(inv.StatusDetails.ExtendedStatus, s.om.IssuingSyncStatuses()) {
+		return nil
+	}
+	_, err = s.DriveInvoice(ctx, inv)
+	return err
 }
 
 // triggerFor maps a Stripe event type to an OpenMeter payment trigger.
@@ -242,6 +279,17 @@ func (s *Settler) paymentPending(ctx context.Context, inv *openmeter.Invoice) er
 		return fmt.Errorf("read stripe invoice %s: %w", stripeInvoiceID, err)
 	}
 
+	// charge_automatically can leave the PI at requires_confirmation after
+	// finalize (saved card / Link). Confirm here so reconcile unsticks it.
+	if stripeInvoice.Status == "open" {
+		if err := s.confirmPaymentIntentIfNeeded(ctx, inv, tgt, stripeInvoice); err != nil {
+			return err
+		}
+		if refreshed, getErr := s.stripe.GetInvoice(ctx, stripeInvoiceID, tgt.requestOptions("")); getErr == nil {
+			stripeInvoice = refreshed
+		}
+	}
+
 	trigger, ok := triggerForStripeInvoiceStatus(stripeInvoice)
 	if !ok {
 		s.log.Debug("payment still pending at stripe",
@@ -254,7 +302,7 @@ func (s *Settler) paymentPending(ctx context.Context, inv *openmeter.Invoice) er
 		"stripe_status", stripeInvoice.Status, "trigger", trigger)
 
 	if err := s.om.UpdatePaymentStatus(ctx, inv.ID, trigger); err != nil {
-		if openmeter.IsConflict(err) {
+		if openmeter.IsAlreadyApplied(err) {
 			metrics.InvoiceStateTransitions.WithLabelValues(trigger, "already_applied").Inc()
 			return nil
 		}

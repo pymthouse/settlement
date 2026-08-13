@@ -85,9 +85,10 @@ type Server struct {
 
 	cfg Config
 
-	customers map[string]*stripe.Customer
-	invoices  map[string]*stripe.Invoice
-	items     map[string]*stripe.InvoiceItem
+	customers        map[string]*stripe.Customer
+	invoices         map[string]*stripe.Invoice
+	items            map[string]*stripe.InvoiceItem
+	paymentIntents   map[string]*stripe.PaymentIntent
 
 	invoiceAccounts map[string]string
 	paymentIDs      map[string]string
@@ -114,6 +115,7 @@ func New(cfg Config) *Server {
 		customers:        map[string]*stripe.Customer{},
 		invoices:         map[string]*stripe.Invoice{},
 		items:            map[string]*stripe.InvoiceItem{},
+		paymentIntents:   map[string]*stripe.PaymentIntent{},
 		invoiceAccounts:  map[string]string{},
 		paymentIDs:       map[string]string{},
 		requests:         map[string]int{},
@@ -140,6 +142,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/invoices/{id}", s.withAuth(s.updateInvoice))
 	mux.HandleFunc("POST /v1/invoices/{id}/finalize", s.withAuth(s.finalizeInvoice))
 	mux.HandleFunc("POST /v1/invoices/{id}/void", s.withAuth(s.voidInvoice))
+	mux.HandleFunc("GET /v1/payment_intents/{id}", s.withAuth(s.getPaymentIntent))
+	mux.HandleFunc("POST /v1/payment_intents/{id}/confirm", s.withAuth(s.confirmPaymentIntent))
 	mux.HandleFunc("POST /v1/invoiceitems", s.withAuth(s.createInvoiceItem))
 	mux.HandleFunc("GET /v1/invoiceitems", s.withAuth(s.listInvoiceItems))
 	mux.HandleFunc("DELETE /v1/invoiceitems/{id}", s.withAuth(s.deleteInvoiceItem))
@@ -467,6 +471,10 @@ func (s *Server) finalizeInvoice(w http.ResponseWriter, r *http.Request) {
 	invoice.Number = "STRIPE-" + strings.ToUpper(invoice.ID)
 	paymentID := s.id("pi")
 	s.paymentIDs[invoice.ID] = paymentID
+	s.paymentIntents[paymentID] = &stripe.PaymentIntent{
+		ID:     paymentID,
+		Status: "requires_confirmation",
+	}
 	invoice.Payments = &stripe.InvoicePaymentList{
 		Data: []stripe.InvoicePayment{{
 			ID:        s.id("inpay"),
@@ -515,6 +523,35 @@ func (s *Server) voidInvoice(w http.ResponseWriter, r *http.Request) {
 	}
 	invoice.Status = "void"
 	writeJSON(w, invoice)
+}
+
+func (s *Server) getPaymentIntent(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	pi, ok := s.paymentIntents[r.PathValue("id")]
+	if !ok {
+		notFound(w, "payment_intent")
+		return
+	}
+	writeJSON(w, pi)
+}
+
+func (s *Server) confirmPaymentIntent(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	pi, ok := s.paymentIntents[r.PathValue("id")]
+	if !ok {
+		notFound(w, "payment_intent")
+		return
+	}
+	if pi.Status == "succeeded" || pi.Status == "processing" {
+		writeJSON(w, pi)
+		return
+	}
+	pi.Status = "succeeded"
+	writeJSON(w, pi)
 }
 
 func (s *Server) createInvoiceItem(w http.ResponseWriter, r *http.Request) {

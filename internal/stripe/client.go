@@ -334,6 +334,37 @@ func (c *Client) FinalizeInvoice(ctx context.Context, id string, autoAdvance boo
 	return &out, nil
 }
 
+// PaymentIntent is the subset of a Stripe PaymentIntent we read/confirm.
+type PaymentIntent struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
+// GetPaymentIntent retrieves a PaymentIntent by id.
+func (c *Client) GetPaymentIntent(ctx context.Context, id string, opts RequestOptions) (*PaymentIntent, error) {
+	var out PaymentIntent
+	path := "/v1/payment_intents/" + url.PathEscape(id)
+	if err := c.do(ctx, "get_payment_intent", http.MethodGet, path, nil, opts, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ConfirmPaymentIntent confirms a PaymentIntent off-session (LINK / saved PM).
+//
+// charge_automatically invoices often leave the PI at requires_confirmation
+// for Link; without this confirm, collection never finishes.
+func (c *Client) ConfirmPaymentIntent(ctx context.Context, id string, opts RequestOptions) (*PaymentIntent, error) {
+	params := url.Values{}
+	params.Set("off_session", "true")
+	var out PaymentIntent
+	path := "/v1/payment_intents/" + url.PathEscape(id) + "/confirm"
+	if err := c.do(ctx, "confirm_payment_intent", http.MethodPost, path, params, opts, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // VoidInvoice voids a finalized invoice.
 func (c *Client) VoidInvoice(ctx context.Context, id string, opts RequestOptions) (*Invoice, error) {
 	var out Invoice
