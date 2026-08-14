@@ -28,12 +28,6 @@ type CollectRequest struct {
 	// here too purely so log lines can be traced back to the originating
 	// pymthouse decision.
 	RequestID string `json:"requestId"`
-	// Force marks an explicit "collect now" (pymthouse's /billing/collect
-	// endpoint) as opposed to the automatic mid-cycle trigger. It decides how
-	// hard we push a freshly raised invoice past OpenMeter's own collection
-	// period and approval delay: see the snapshot/advance/approve sequence
-	// below.
-	Force bool `json:"force"`
 }
 
 // HandleCollectRequest processes one raw collect-request body.
@@ -78,7 +72,7 @@ func (s *Settler) HandleCollectRequest(ctx context.Context, raw []byte) (string,
 		if invoiceID == "" {
 			continue
 		}
-		s.pushPastCollectionWindow(ctx, invoiceID, req.Force)
+		s.pushPastCollectionWindow(ctx, invoiceID)
 	}
 
 	metrics.InvoiceStateTransitions.WithLabelValues(HandlerCollectRequest, "ok").Inc()
@@ -88,28 +82,25 @@ func (s *Settler) HandleCollectRequest(ctx context.Context, raw []byte) (string,
 	return HandlerCollectRequest, nil
 }
 
-// pushPastCollectionWindow mirrors what pymthouse used to do the moment it
-// raised an invoice, moved here with the raise itself. With auto_advance and
-// a zero collection period Advance is frequently a no-op — the invoice may
-// already be past the state it would move it from — so failures here are
-// routine and only logged, never surfaced to the caller: the worst case is
-// settlement's normal draft-sync webhook handling picks up the advance a
-// little later instead of immediately.
-func (s *Settler) pushPastCollectionWindow(ctx context.Context, invoiceID string, force bool) {
-	if force {
-		// Native way to skip the collection period for an invoice parked in
-		// draft.waiting_for_collection.
-		if err := s.om.SnapshotQuantities(ctx, invoiceID); err != nil {
-			s.log.Info("collect request: snapshot skipped", "invoice_id", invoiceID, "error", err)
-		}
-	}
+// pushPastCollectionWindow nudges a freshly raised invoice with Advance. With
+// auto_advance and a zero collection period this is frequently a no-op — the
+// invoice may already be past the state it would move it from — so failure
+// here is routine and only logged, never surfaced to the caller: the normal
+// draft-sync webhook handling picks up the advance shortly after regardless.
+//
+// This used to also try SnapshotQuantities + Approve immediately, to skip
+// straight to issuing for an explicit "collect now" request. Removed: those
+// calls happen synchronously right after the raise, but the invoice is still
+// mid-flight through OpenMeter's own async draft-sync webhook at that point
+// — every observed attempt failed with "cannot trigger_approve invoice in
+// status [draft.syncing]", so the fast path never actually delivered its
+// speed benefit; the invoice completed via OpenMeter's own natural
+// progression regardless, just without a useless failed API call first. If a
+// genuinely faster "collect now" is wanted later, it needs to poll for the
+// invoice to actually reach the approvable state before calling Approve, not
+// assume it already has.
+func (s *Settler) pushPastCollectionWindow(ctx context.Context, invoiceID string) {
 	if err := s.om.Advance(ctx, invoiceID); err != nil {
 		s.log.Info("collect request: advance skipped", "invoice_id", invoiceID, "error", err)
-	}
-	if force {
-		// Skip draft.waiting_auto_approval so settlement can issue immediately.
-		if err := s.om.Approve(ctx, invoiceID); err != nil {
-			s.log.Info("collect request: approve skipped", "invoice_id", invoiceID, "error", err)
-		}
 	}
 }
