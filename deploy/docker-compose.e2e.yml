@@ -24,6 +24,9 @@ x-kafka-env: &kafka-env
 services:
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:v24.2.4
+    environment:
+      # Admin API bind; default loopback. Set REDPANDA_ADMIN_ADDR=0.0.0.0 to expose.
+      REDPANDA_ADMIN_ADDR: ${REDPANDA_ADMIN_ADDR:-127.0.0.1}
     command:
       - redpanda
       - start
@@ -33,8 +36,9 @@ services:
       - --kafka-addr=PLAINTEXT://0.0.0.0:9092
       - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
       - --check=false
-      # Settlement never calls the Admin API; keep the Kafka listener only.
+      # Settlement never calls the Admin API; disable it and bind loopback by default.
       - --set=redpanda.enable_admin_api=false
+      - --set=redpanda.admin=[{address:${REDPANDA_ADMIN_ADDR:-127.0.0.1},port:9644}]
     ports:
       - "127.0.0.1:19092:9092"
     healthcheck:
