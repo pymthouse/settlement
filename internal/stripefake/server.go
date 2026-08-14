@@ -85,10 +85,10 @@ type Server struct {
 
 	cfg Config
 
-	customers        map[string]*stripe.Customer
-	invoices         map[string]*stripe.Invoice
-	items            map[string]*stripe.InvoiceItem
-	paymentIntents   map[string]*stripe.PaymentIntent
+	customers      map[string]*stripe.Customer
+	invoices       map[string]*stripe.Invoice
+	items          map[string]*stripe.InvoiceItem
+	paymentIntents map[string]*stripe.PaymentIntent
 
 	invoiceAccounts map[string]string
 	paymentIDs      map[string]string
