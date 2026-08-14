@@ -3,6 +3,7 @@ package openmeter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -174,6 +175,15 @@ func TestAPIErrorRetryability(t *testing.T) {
 func TestErrorHelpers(t *testing.T) {
 	notFound := &APIError{StatusCode: http.StatusNotFound}
 	conflict := &APIError{StatusCode: http.StatusConflict}
+	alreadyPaid := &APIError{
+		StatusCode: http.StatusBadRequest,
+		Body:       `{"message":"invoice is already paid; no leaving transition for trigger_paid"}`,
+	}
+	premature := &APIError{
+		StatusCode: http.StatusBadRequest,
+		Body:       `{"detail":"No valid leaving transitions are permitted from state 'issuing.syncing' for trigger 'trigger_paid'"}`,
+	}
+	otherBad := &APIError{StatusCode: http.StatusBadRequest, Body: `{"message":"invalid trigger"}`}
 
 	if !IsNotFound(notFound) || IsNotFound(conflict) {
 		t.Error("IsNotFound misclassified an error")
@@ -184,6 +194,130 @@ func TestErrorHelpers(t *testing.T) {
 	if IsNotFound(nil) || IsConflict(nil) {
 		t.Error("nil should not classify as an API error")
 	}
+	if !IsAlreadyApplied(conflict) || !IsAlreadyApplied(alreadyPaid) {
+		t.Error("IsAlreadyApplied should accept 409 and already-paid 4xx")
+	}
+	if IsAlreadyApplied(premature) {
+		t.Error("IsAlreadyApplied must not swallow premature trigger_paid from issuing.syncing")
+	}
+	if !IsPrematurePaymentTrigger(premature) || IsPrematurePaymentTrigger(alreadyPaid) {
+		t.Error("IsPrematurePaymentTrigger misclassified")
+	}
+	if IsAlreadyApplied(otherBad) || IsAlreadyApplied(nil) {
+		t.Error("IsAlreadyApplied misclassified an unrelated error")
+	}
+}
+
+func TestInvoicePendingLinesPostsAndDecodes(t *testing.T) {
+	var gotPath, gotMethod, gotBody string
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `[{"id":"inv_om_1"},{"id":"inv_om_2"}]`)
+	}))
+
+	results, err := client.InvoicePendingLines(context.Background(), "cus_om_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "/api/v1/billing/invoices/invoice"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(gotBody), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["customerId"] != "cus_om_1" {
+		t.Errorf("customerId = %v, want cus_om_1", decoded["customerId"])
+	}
+	if decoded["progressiveBillingOverride"] != true {
+		t.Errorf("progressiveBillingOverride = %v, want true", decoded["progressiveBillingOverride"])
+	}
+
+	if len(results) != 2 || results[0].ID != "inv_om_1" || results[1].ID != "inv_om_2" {
+		t.Errorf("results = %+v, want [inv_om_1 inv_om_2]", results)
+	}
+}
+
+// This is the collision this whole feature exists to absorb: a second
+// raise landing on Konnect while the customer's prior invoice is still
+// mid-realization. It must come back as the sentinel error, not a bare
+// APIError, so HandleCollectRequest can treat it as a no-op instead of a
+// retryable failure.
+func TestInvoicePendingLinesClassifiesRealizationRunActive(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"message":"an ACTIVE Realization run already exists for this customer"}`)
+	}))
+
+	_, err := client.InvoicePendingLines(context.Background(), "cus_om_1")
+	if !errors.Is(err, ErrRealizationRunActive) {
+		t.Errorf("err = %v, want ErrRealizationRunActive", err)
+	}
+}
+
+func TestInvoicePendingLinesLeavesUnrelated400s(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"message":"customer not found"}`)
+	}))
+
+	_, err := client.InvoicePendingLines(context.Background(), "cus_missing")
+	if errors.Is(err, ErrRealizationRunActive) {
+		t.Error("unrelated 400 must not be misclassified as ErrRealizationRunActive")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		t.Errorf("err = %v, want a plain *APIError(400)", err)
+	}
+}
+
+func TestSnapshotAdvanceApproveHitTheDocumentedEndpoints(t *testing.T) {
+	var gotPath, gotMethod string
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		w.WriteHeader(http.StatusOK)
+	}))
+	ctx := context.Background()
+
+	t.Run("snapshot quantities", func(t *testing.T) {
+		if err := client.SnapshotQuantities(ctx, "inv_1"); err != nil {
+			t.Fatal(err)
+		}
+		if gotMethod != http.MethodPost {
+			t.Errorf("method = %q, want POST", gotMethod)
+		}
+		if want := "/api/v1/billing/invoices/inv_1/snapshot-quantities"; gotPath != want {
+			t.Errorf("path = %q, want %q", gotPath, want)
+		}
+	})
+
+	t.Run("advance", func(t *testing.T) {
+		if err := client.Advance(ctx, "inv_1"); err != nil {
+			t.Fatal(err)
+		}
+		if want := "/api/v1/billing/invoices/inv_1/advance"; gotPath != want {
+			t.Errorf("path = %q, want %q", gotPath, want)
+		}
+	})
+
+	t.Run("approve", func(t *testing.T) {
+		if err := client.Approve(ctx, "inv_1"); err != nil {
+			t.Fatal(err)
+		}
+		if want := "/api/v1/billing/invoices/inv_1/approve"; gotPath != want {
+			t.Errorf("path = %q, want %q", gotPath, want)
+		}
+	})
 }
 
 func TestGetInvoiceDecodesTheLifecycleFields(t *testing.T) {
@@ -353,6 +487,12 @@ func TestKonnectNeedsMeteringV1(t *testing.T) {
 	}
 	if !konnectNeedsMeteringV1("/customers/cust_1", http.MethodGet) {
 		t.Error("customer GET should use metering/v1 (metadata vs labels)")
+	}
+	if !konnectNeedsMeteringV1("/billing/invoices/invoice", http.MethodPost) {
+		t.Error("invoice-pending-lines POST should use metering/v1")
+	}
+	if konnectNeedsMeteringV1("/billing/invoices/invoice", http.MethodDelete) {
+		t.Error("the raise rule is POST-only; it should not match other verbs on the same literal path")
 	}
 }
 

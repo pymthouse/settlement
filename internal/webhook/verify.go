@@ -249,3 +249,48 @@ func nonEmpty(in []string) []string {
 	}
 	return out
 }
+
+// SharedSecretVerifier authenticates a first-party caller (pymthouse) by
+// plain shared-secret comparison rather than an HMAC signature over the body.
+//
+// This is a deliberately different shape from StripeVerifier/StandardVerifier:
+// those verify that a *third party* holding a webhook secret produced *this
+// exact body*, which is what makes the Kafka value a durable, re-verifiable
+// audit record months later. pymthouse is not a third party signing a payload
+// for us to audit — it is asking us to do something, authenticated the same
+// way any internal service-to-service call is. Comparing the presented secret
+// against the configured list is sufficient and simpler; there is nothing to
+// gain from binding a signature to a body only pymthouse itself produced.
+type SharedSecretVerifier struct {
+	secrets []string
+}
+
+// NewSharedSecretVerifier builds a verifier over the configured secret list.
+func NewSharedSecretVerifier(secrets []string) *SharedSecretVerifier {
+	return &SharedSecretVerifier{secrets: nonEmpty(secrets)}
+}
+
+// Enabled reports whether any secret is configured.
+func (v *SharedSecretVerifier) Enabled() bool { return len(v.secrets) > 0 }
+
+// Verify checks the presented secret against every configured one in
+// constant time, so which position (if any) matched is never observable.
+func (v *SharedSecretVerifier) Verify(presented string) error {
+	if len(v.secrets) == 0 {
+		return ErrNoMatch
+	}
+	if presented == "" {
+		return ErrInvalidHeader
+	}
+	got := []byte(presented)
+	matched := false
+	for _, secret := range v.secrets {
+		if hmac.Equal(got, []byte(secret)) {
+			matched = true
+		}
+	}
+	if !matched {
+		return ErrNoMatch
+	}
+	return nil
+}

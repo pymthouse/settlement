@@ -38,6 +38,9 @@ type Settler interface {
 	HandleOpenMeterNotification(ctx context.Context, body []byte) (string, error)
 	// HandleStripeEvent processes a Stripe webhook body.
 	HandleStripeEvent(ctx context.Context, body []byte) (string, error)
+	// HandleCollectRequest processes a pymthouse-originated collect-request
+	// body, raising the customer's pending gathering lines.
+	HandleCollectRequest(ctx context.Context, body []byte) (string, error)
 }
 
 // DLQPublisher parks messages that could not be settled.
@@ -284,6 +287,8 @@ func (r *Runner) handle(ctx context.Context, source string, body []byte) (string
 		return r.settler.HandleOpenMeterNotification(ctx, body)
 	case events.SourceStripe:
 		return r.settler.HandleStripeEvent(ctx, body)
+	case events.SourceCollectRequest:
+		return r.settler.HandleCollectRequest(ctx, body)
 	default:
 		return lifecycle.HandlerNoop, faults.Permanentf("unknown_source", "no handler for source %q", source)
 	}

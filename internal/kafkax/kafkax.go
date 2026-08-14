@@ -171,6 +171,43 @@ type TopicSpec struct {
 	Compression string
 }
 
+// DefaultBillingTopicSpecs describes every billing topic with the same
+// conservative defaults `settlementctl topics ensure` has always used
+// (partitions, retention, compression). Producer and worker call this at
+// startup so a freshly added topic — or a fresh environment — is never
+// missing because someone forgot to run the CLI by hand; EnsureTopics is a
+// no-op for a topic that already exists, and an operator who wants different
+// settings still has settlementctl's flags for that.
+func DefaultBillingTopicSpecs(o Options) []TopicSpec {
+	const (
+		partitions        = 12
+		replicationFactor = 1
+		retentionDays     = 3650
+		minISR            = 1
+		compression       = "producer"
+	)
+	retentionMs := int64(retentionDays) * 24 * int64(time.Hour/time.Millisecond)
+	spec := func(name string) TopicSpec {
+		return TopicSpec{
+			Name:              name,
+			Partitions:        partitions,
+			ReplicationFactor: replicationFactor,
+			RetentionMs:       retentionMs,
+			MinInSyncReplicas: minISR,
+			Compression:       compression,
+		}
+	}
+
+	var specs []TopicSpec
+	for _, name := range []string{o.TopicOpenMeter, o.TopicStripe, o.TopicDLQ, o.TopicCollectRequest} {
+		if name == "" {
+			continue
+		}
+		specs = append(specs, spec(name))
+	}
+	return specs
+}
+
 // EnsureTopics creates any topic that does not exist yet. Existing topics are
 // left untouched — widening a partition count would re-shard the keyspace and
 // break per-customer ordering for in-flight invoices.

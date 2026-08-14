@@ -11,6 +11,9 @@ FROM redpandadata/redpanda:v24.2.4
 
 USER root
 
+# Settlement only uses the Kafka API (:9092). The Admin API (:9644) is unused
+# by producer/worker/settlementctl, so disable it rather than leave an
+# unauthenticated listener on 0.0.0.0.
 CMD ["rpk", "redpanda", "start", \
   "--kafka-addr", "internal://0.0.0.0:9092", \
   "--advertise-kafka-addr", "internal://settlement-kafka.railway.internal:9092", \
@@ -20,4 +23,5 @@ CMD ["rpk", "redpanda", "start", \
   "--overprovisioned", \
   "--check=false", \
   "--default-log-level", "warn", \
-  "--set", "redpanda.auto_create_topics_enabled=false"]
+  "--set", "redpanda.auto_create_topics_enabled=false", \
+  "--set", "redpanda.enable_admin_api=false"]

@@ -46,6 +46,10 @@ func (f *fakeStripe) FailNext(path string, count int) {
 	f.inner.FailNext(path, count)
 }
 
+func (f *fakeStripe) OmitPaymentOnFinalize(count int) {
+	f.inner.OmitPaymentOnFinalize(count)
+}
+
 func (f *fakeStripe) SetInvoiceStatus(id, status string) {
 	f.inner.SetInvoiceStatus(id, status)
 }
@@ -108,8 +112,24 @@ type fakeOpenMeter struct {
 	paymentTriggers   map[string][]string
 	// conflictOn makes a completion endpoint answer 409 once.
 	conflictOn map[string]bool
+	// alreadyPaidOn makes payment/status answer a non-409 already-paid 4xx once.
+	alreadyPaidOn bool
 	// listPages is what ListInvoices returns.
 	listPages []openmeter.Invoice
+	// realizationRunActive makes invoice-pending-lines answer Konnect's
+	// stuck-invoice 400 instead of succeeding.
+	realizationRunActive bool
+	// invoicePendingLinesResult is what a successful raise returns.
+	invoicePendingLinesResult []openmeter.InvoicePendingLinesResult
+	// invoicePendingLinesCalls records every customerId this fake was asked
+	// to raise, in call order.
+	invoicePendingLinesCalls []string
+	// snapshotCalls, advanceCalls, approveCalls record every invoiceId these
+	// post-raise nudges were called with, in call order.
+	snapshotCalls, advanceCalls, approveCalls []string
+	// snapshotFails makes snapshot-quantities answer 400, simulating an
+	// invoice that is no longer in a snapshot-able state.
+	snapshotFails bool
 }
 
 func newFakeOpenMeter(t *testing.T) *fakeOpenMeter {
@@ -131,6 +151,10 @@ func newFakeOpenMeter(t *testing.T) *fakeOpenMeter {
 	mux.HandleFunc("POST /api/v1/apps/custom-invoicing/{id}/draft/synchronized", f.draftSync)
 	mux.HandleFunc("POST /api/v1/apps/custom-invoicing/{id}/issuing/synchronized", f.issuingSynchronized)
 	mux.HandleFunc("POST /api/v1/apps/custom-invoicing/{id}/payment/status", f.paymentStatus)
+	mux.HandleFunc("POST /api/v1/billing/invoices/invoice", f.invoicePendingLines)
+	mux.HandleFunc("POST /api/v1/billing/invoices/{id}/snapshot-quantities", f.snapshotQuantities)
+	mux.HandleFunc("POST /api/v1/billing/invoices/{id}/advance", f.advanceInvoice)
+	mux.HandleFunc("POST /api/v1/billing/invoices/{id}/approve", f.approveInvoice)
 
 	f.server = httptest.NewServer(mux)
 	t.Cleanup(f.server.Close)
@@ -229,8 +253,59 @@ func (f *fakeOpenMeter) paymentStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"message":"already applied"}`, http.StatusConflict)
 		return
 	}
+	if f.alreadyPaidOn {
+		f.alreadyPaidOn = false
+		http.Error(w, `{"message":"invoice is already paid; no leaving transition for trigger_paid"}`, http.StatusBadRequest)
+		return
+	}
 	id := r.PathValue("id")
 	f.paymentTriggers[id] = append(f.paymentTriggers[id], body.Trigger)
+	w.WriteHeader(http.StatusOK)
+}
+
+func (f *fakeOpenMeter) invoicePendingLines(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		CustomerID string `json:"customerId"`
+	}
+	decode(r, &body)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.invoicePendingLinesCalls = append(f.invoicePendingLinesCalls, body.CustomerID)
+
+	if f.realizationRunActive {
+		http.Error(w, `{"message":"an active realization run already exists for this customer"}`, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, f.invoicePendingLinesResult)
+}
+
+func (f *fakeOpenMeter) snapshotQuantities(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.snapshotCalls = append(f.snapshotCalls, r.PathValue("id"))
+	if f.snapshotFails {
+		http.Error(w, `{"message":"invoice is not in a snapshot-able state"}`, http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (f *fakeOpenMeter) advanceInvoice(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.advanceCalls = append(f.advanceCalls, r.PathValue("id"))
+	w.WriteHeader(http.StatusOK)
+}
+
+func (f *fakeOpenMeter) approveInvoice(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.approveCalls = append(f.approveCalls, r.PathValue("id"))
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -262,6 +337,48 @@ func (f *fakeOpenMeter) triggersFor(invoiceID string) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.paymentTriggers[invoiceID]...)
+}
+
+func (f *fakeOpenMeter) setRealizationRunActive(active bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.realizationRunActive = active
+}
+
+func (f *fakeOpenMeter) setInvoicePendingLinesResult(results []openmeter.InvoicePendingLinesResult) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.invoicePendingLinesResult = results
+}
+
+func (f *fakeOpenMeter) invoicePendingLinesCallsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.invoicePendingLinesCalls...)
+}
+
+func (f *fakeOpenMeter) snapshotCallsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.snapshotCalls...)
+}
+
+func (f *fakeOpenMeter) advanceCallsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.advanceCalls...)
+}
+
+func (f *fakeOpenMeter) approveCallsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.approveCalls...)
+}
+
+func (f *fakeOpenMeter) setSnapshotFails(fails bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.snapshotFails = fails
 }
 
 // newTestSettler wires a Settler against both fakes.

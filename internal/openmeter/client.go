@@ -96,6 +96,9 @@ func konnectNeedsMeteringV1(path, method string) bool {
 	if method == http.MethodGet && strings.HasPrefix(pathOnly, "/billing/invoices") {
 		return true
 	}
+	if method == http.MethodPost && pathOnly == "/billing/invoices/invoice" {
+		return true
+	}
 	if method == http.MethodGet && strings.HasPrefix(pathOnly, "/customers/") {
 		return true
 	}
@@ -142,6 +145,50 @@ func IsNotFound(err error) bool {
 func IsConflict(err error) bool {
 	var apiErr *APIError
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict
+}
+
+// IsAlreadyApplied reports whether err means the payment trigger was already
+// applied (or the invoice is already in a terminal paid state).
+//
+// OpenMeter often returns a non-409 4xx ("already paid") instead of 409;
+// treating those as success stops DLQ spam on webhook redeliveries.
+//
+// Do not match every "no leaving transition" / "trigger_paid" body — a paid
+// trigger refused from issuing.syncing is a sequencing bug, not a no-op.
+func IsAlreadyApplied(err error) bool {
+	if IsConflict(err) {
+		return true
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.StatusCode < 400 || apiErr.StatusCode >= 500 {
+		return false
+	}
+	msg := strings.ToLower(apiErr.Body)
+	if strings.Contains(msg, "issuing.sync") || strings.Contains(msg, "draft.sync") {
+		return false
+	}
+	return strings.Contains(msg, "already paid") ||
+		strings.Contains(msg, "from state 'paid'") ||
+		strings.Contains(msg, `from state "paid"`) ||
+		(strings.Contains(msg, "no leaving transition") && strings.Contains(msg, "already"))
+}
+
+// IsPrematurePaymentTrigger reports whether err means trigger_paid (or similar)
+// arrived before issuing sync completed.
+func IsPrematurePaymentTrigger(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.StatusCode < 400 || apiErr.StatusCode >= 500 {
+		return false
+	}
+	msg := strings.ToLower(apiErr.Body)
+	return strings.Contains(msg, "issuing.sync") &&
+		(strings.Contains(msg, "trigger_paid") || strings.Contains(msg, "paid"))
 }
 
 // DraftSynchronized completes the draft sync hook.
@@ -207,6 +254,77 @@ type InvoiceList struct {
 }
 
 // ListInvoices pages through invoices for the reconciliation sweep.
+// InvoicePendingLinesResult is one invoice OpenMeter created from a
+// customer's pending gathering lines.
+type InvoicePendingLinesResult struct {
+	ID string `json:"id"`
+}
+
+// ErrRealizationRunActive means the customer already has an unresolved
+// invoicing attempt in flight. Not a failure of this call — the prior one has
+// simply not finalized (commonly: it is waiting on a payment-status report we
+// have not sent yet). Retrying immediately will hit the identical error;
+// callers should treat this as a no-op, not a permanent failure.
+var ErrRealizationRunActive = errors.New("openmeter: active realization run already exists for this customer")
+
+// InvoicePendingLines promotes a customer's gathering lines into a real
+// invoice. This is the one OpenMeter write settlement makes that *raises* an
+// invoice rather than driving one that already exists — ownership of "when do
+// we invoice" still lives in pymthouse (soft-negative ceiling, lead window);
+// this only executes a raise pymthouse has already decided is due, through
+// the same per-customer lane ordering every other handler gets, so a second
+// request for a customer already mid-raise waits its turn instead of racing
+// the first one on Konnect's side.
+func (c *Client) InvoicePendingLines(ctx context.Context, customerID string) ([]InvoicePendingLinesResult, error) {
+	var out []InvoicePendingLinesResult
+	body := struct {
+		CustomerID                 string `json:"customerId"`
+		ProgressiveBillingOverride bool   `json:"progressiveBillingOverride"`
+	}{CustomerID: customerID, ProgressiveBillingOverride: true}
+	err := c.do(ctx, "invoice_pending_lines", http.MethodPost, "/api/v1/billing/invoices/invoice", body, &out)
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest &&
+			strings.Contains(strings.ToLower(apiErr.Body), "active realization run already exists") {
+			return nil, ErrRealizationRunActive
+		}
+		return nil, err
+	}
+	return out, nil
+}
+
+// SnapshotQuantities freezes a freshly raised invoice's usage-based line
+// quantities. It only succeeds while the invoice is still in a
+// snapshot-able state (e.g. draft.waiting_for_collection); calling it after
+// that window has passed is expected to fail and callers should treat that
+// as a no-op, not an error worth surfacing.
+//
+// POST /api/v1/billing/invoices/{invoiceId}/snapshot-quantities
+func (c *Client) SnapshotQuantities(ctx context.Context, invoiceID string) error {
+	path := fmt.Sprintf("/api/v1/billing/invoices/%s/snapshot-quantities", url.PathEscape(invoiceID))
+	return c.post(ctx, "snapshot_quantities", path, nil)
+}
+
+// Advance nudges an invoice through whatever automatic transition it is
+// currently waiting on. With auto_advance and a zero collection period this
+// is frequently a no-op — the invoice may already be past the state Advance
+// would move it from — so a failure here is routine, not exceptional.
+//
+// POST /api/v1/billing/invoices/{invoiceId}/advance
+func (c *Client) Advance(ctx context.Context, invoiceID string) error {
+	path := fmt.Sprintf("/api/v1/billing/invoices/%s/advance", url.PathEscape(invoiceID))
+	return c.post(ctx, "advance_invoice", path, nil)
+}
+
+// Approve skips draft.waiting_auto_approval so a force-collected invoice can
+// issue immediately instead of waiting for OpenMeter's own approval delay.
+//
+// POST /api/v1/billing/invoices/{invoiceId}/approve
+func (c *Client) Approve(ctx context.Context, invoiceID string) error {
+	path := fmt.Sprintf("/api/v1/billing/invoices/%s/approve", url.PathEscape(invoiceID))
+	return c.post(ctx, "approve_invoice", path, nil)
+}
+
 func (c *Client) ListInvoices(ctx context.Context, in ListInvoicesInput) (*InvoiceList, error) {
 	q := url.Values{}
 	for _, s := range in.Statuses {

@@ -80,7 +80,7 @@ func kafkaOptions() (config.Kafka, error) {
 		// Only the Kafka half matters here; missing webhook secrets are
 		// irrelevant to an operator replaying a topic.
 		k := cfg.Kafka
-		if len(k.Brokers) == 0 || k.TopicStripe == "" || k.TopicOpenMeter == "" || k.TopicDLQ == "" {
+		if len(k.Brokers) == 0 || k.TopicStripe == "" || k.TopicOpenMeter == "" || k.TopicDLQ == "" || k.TopicCollectRequest == "" {
 			return config.Kafka{}, err
 		}
 	}
@@ -112,6 +112,7 @@ func topicsCommand(ctx context.Context, args []string) error {
 		{Name: opts.TopicOpenMeter, Partitions: *partitions, ReplicationFactor: *replication, RetentionMs: retentionMs, MinInSyncReplicas: *minISR, Compression: *compression},
 		{Name: opts.TopicStripe, Partitions: *partitions, ReplicationFactor: *replication, RetentionMs: retentionMs, MinInSyncReplicas: *minISR, Compression: *compression},
 		{Name: opts.TopicDLQ, Partitions: *partitions, ReplicationFactor: *replication, RetentionMs: retentionMs, MinInSyncReplicas: *minISR, Compression: *compression},
+		{Name: opts.TopicCollectRequest, Partitions: *partitions, ReplicationFactor: *replication, RetentionMs: retentionMs, MinInSyncReplicas: *minISR, Compression: *compression},
 	}
 
 	if err := kafkax.EnsureTopics(ctx, opts, specs); err != nil {

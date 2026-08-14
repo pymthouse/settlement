@@ -85,9 +85,10 @@ type Server struct {
 
 	cfg Config
 
-	customers map[string]*stripe.Customer
-	invoices  map[string]*stripe.Invoice
-	items     map[string]*stripe.InvoiceItem
+	customers      map[string]*stripe.Customer
+	invoices       map[string]*stripe.Invoice
+	items          map[string]*stripe.InvoiceItem
+	paymentIntents map[string]*stripe.PaymentIntent
 
 	invoiceAccounts map[string]string
 	paymentIDs      map[string]string
@@ -102,6 +103,13 @@ type Server struct {
 	idempotencyIndex map[string]string
 	nextID           int
 	client           *http.Client
+
+	// omitPaymentOnFinalize simulates Stripe's real, observed behavior of
+	// finalizing an invoice before its PaymentIntent is attached for
+	// automatic collection: the next N finalize calls succeed (status
+	// "open") but leave Payments unset, so PrimaryPaymentIntent() fails
+	// exactly as it does against the real API during that window.
+	omitPaymentOnFinalize int
 }
 
 // New builds a fake Stripe server.
@@ -114,6 +122,7 @@ func New(cfg Config) *Server {
 		customers:        map[string]*stripe.Customer{},
 		invoices:         map[string]*stripe.Invoice{},
 		items:            map[string]*stripe.InvoiceItem{},
+		paymentIntents:   map[string]*stripe.PaymentIntent{},
 		invoiceAccounts:  map[string]string{},
 		paymentIDs:       map[string]string{},
 		requests:         map[string]int{},
@@ -140,6 +149,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/invoices/{id}", s.withAuth(s.updateInvoice))
 	mux.HandleFunc("POST /v1/invoices/{id}/finalize", s.withAuth(s.finalizeInvoice))
 	mux.HandleFunc("POST /v1/invoices/{id}/void", s.withAuth(s.voidInvoice))
+	mux.HandleFunc("GET /v1/payment_intents/{id}", s.withAuth(s.getPaymentIntent))
+	mux.HandleFunc("POST /v1/payment_intents/{id}/confirm", s.withAuth(s.confirmPaymentIntent))
 	mux.HandleFunc("POST /v1/invoiceitems", s.withAuth(s.createInvoiceItem))
 	mux.HandleFunc("GET /v1/invoiceitems", s.withAuth(s.listInvoiceItems))
 	mux.HandleFunc("DELETE /v1/invoiceitems/{id}", s.withAuth(s.deleteInvoiceItem))
@@ -151,6 +162,16 @@ func (s *Server) FailNext(path string, count int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failNext[path] = count
+}
+
+// OmitPaymentOnFinalize makes the next `count` invoice finalizations
+// succeed without attaching a PaymentIntent, reproducing the brief real-world
+// window where Stripe's automatic-collection PaymentIntent is not yet
+// attached immediately after finalize.
+func (s *Server) OmitPaymentOnFinalize(count int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.omitPaymentOnFinalize = count
 }
 
 // SetInvoiceStatus changes an invoice's status in place.
@@ -465,8 +486,22 @@ func (s *Server) finalizeInvoice(w http.ResponseWriter, r *http.Request) {
 
 	invoice.Status = "open"
 	invoice.Number = "STRIPE-" + strings.ToUpper(invoice.ID)
+
+	if s.omitPaymentOnFinalize > 0 {
+		s.omitPaymentOnFinalize--
+		s.retotalLocked(invoice)
+		out := invoice
+		s.mu.Unlock()
+		writeJSON(w, out)
+		return
+	}
+
 	paymentID := s.id("pi")
 	s.paymentIDs[invoice.ID] = paymentID
+	s.paymentIntents[paymentID] = &stripe.PaymentIntent{
+		ID:     paymentID,
+		Status: "requires_confirmation",
+	}
 	invoice.Payments = &stripe.InvoicePaymentList{
 		Data: []stripe.InvoicePayment{{
 			ID:        s.id("inpay"),
@@ -515,6 +550,35 @@ func (s *Server) voidInvoice(w http.ResponseWriter, r *http.Request) {
 	}
 	invoice.Status = "void"
 	writeJSON(w, invoice)
+}
+
+func (s *Server) getPaymentIntent(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	pi, ok := s.paymentIntents[r.PathValue("id")]
+	if !ok {
+		notFound(w, "payment_intent")
+		return
+	}
+	writeJSON(w, pi)
+}
+
+func (s *Server) confirmPaymentIntent(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	pi, ok := s.paymentIntents[r.PathValue("id")]
+	if !ok {
+		notFound(w, "payment_intent")
+		return
+	}
+	if pi.Status == "succeeded" || pi.Status == "processing" {
+		writeJSON(w, pi)
+		return
+	}
+	pi.Status = "succeeded"
+	writeJSON(w, pi)
 }
 
 func (s *Server) createInvoiceItem(w http.ResponseWriter, r *http.Request) {

@@ -120,6 +120,78 @@ func TestDescribeOpenMeterKeyFallbacks(t *testing.T) {
 	}
 }
 
+func TestDescribeCollectRequestKeysOnCustomer(t *testing.T) {
+	body := []byte(`{"clientId":"client_1","externalUserId":"eu_1","customerId":"cus_om_1","requestId":"req_1"}`)
+
+	desc, err := DescribeCollectRequest(body)
+	if err != nil {
+		t.Fatalf("DescribeCollectRequest: %v", err)
+	}
+	if desc.Source != SourceCollectRequest {
+		t.Errorf("Source = %q, want %q", desc.Source, SourceCollectRequest)
+	}
+	if desc.PartitionKey != "cus_om_1" {
+		t.Errorf("PartitionKey = %q, want the OpenMeter customer id, so this lands in the same lane as that customer's other events", desc.PartitionKey)
+	}
+	if desc.EventID != "req_1" {
+		t.Errorf("EventID = %q, want the caller-minted requestId", desc.EventID)
+	}
+	if desc.EventType != "collect.requested" {
+		t.Errorf("EventType = %q, want collect.requested", desc.EventType)
+	}
+}
+
+func TestDescribeCollectRequestRejectsMissingFields(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"missing customerId", `{"clientId":"client_1","externalUserId":"eu_1","requestId":"req_1"}`},
+		{"missing requestId", `{"clientId":"client_1","externalUserId":"eu_1","customerId":"cus_om_1"}`},
+		{"unparseable", `not json`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := DescribeCollectRequest([]byte(tc.body)); !errors.Is(err, ErrUnparseable) {
+				t.Errorf("err = %v, want ErrUnparseable", err)
+			}
+		})
+	}
+}
+
+// A second, genuinely distinct collect request for the same customer must
+// not be mistaken for a retry of the first: without a caller-minted
+// requestId to key on, a content hash of {clientId, externalUserId,
+// customerId} would be identical across both and the second would be
+// silently deduped away as a duplicate of the first.
+func TestDescribeCollectRequestDistinctRequestsGetDistinctKeys(t *testing.T) {
+	first, err := DescribeCollectRequest([]byte(`{"customerId":"cus_om_1","requestId":"req_1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := DescribeCollectRequest([]byte(`{"customerId":"cus_om_1","requestId":"req_2"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.DedupeKey() == second.DedupeKey() {
+		t.Fatalf("two distinct raise requests for the same customer must not collapse to one dedupe key: %q", first.DedupeKey())
+	}
+	if first.PartitionKey != second.PartitionKey {
+		t.Fatalf("both requests are for the same customer and must land in the same lane: %q vs %q", first.PartitionKey, second.PartitionKey)
+	}
+}
+
+func TestDescribeDispatchesCollectRequest(t *testing.T) {
+	desc, err := Describe(SourceCollectRequest, []byte(`{"customerId":"cus_om_1","requestId":"req_1"}`))
+	if err != nil {
+		t.Fatalf("Describe: %v", err)
+	}
+	if desc.Source != SourceCollectRequest || desc.PartitionKey != "cus_om_1" {
+		t.Errorf("unexpected descriptor: %+v", desc)
+	}
+}
+
 // Every event for one payer must land on one partition, or the lifecycle can
 // be processed out of order.
 func TestPartitionKeyIsStableAcrossEventsForOnePayer(t *testing.T) {

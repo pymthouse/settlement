@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -34,32 +35,35 @@ type Publisher interface {
 
 // Server routes and verifies inbound webhooks.
 type Server struct {
-	cfg       config.Producer
-	log       *slog.Logger
-	publisher Publisher
-	stripe    *webhook.StripeVerifier
-	standard  *webhook.StandardVerifier
-	now       func() time.Time
+	cfg           config.Producer
+	log           *slog.Logger
+	publisher     Publisher
+	stripe        *webhook.StripeVerifier
+	standard      *webhook.StandardVerifier
+	collectShared *webhook.SharedSecretVerifier
+	now           func() time.Time
 }
 
 // New builds the doorman.
 func New(cfg config.Producer, log *slog.Logger, publisher Publisher) *Server {
 	return &Server{
-		cfg:       cfg,
-		log:       log,
-		publisher: publisher,
-		stripe:    webhook.NewStripeVerifier(cfg.StripeWebhookSecrets, cfg.StripeToleranceSeconds),
-		standard:  webhook.NewStandardVerifier(cfg.OpenMeterWebhookSecrets, cfg.OpenMeterToleranceSecs),
-		now:       time.Now,
+		cfg:           cfg,
+		log:           log,
+		publisher:     publisher,
+		stripe:        webhook.NewStripeVerifier(cfg.StripeWebhookSecrets, cfg.StripeToleranceSeconds),
+		standard:      webhook.NewStandardVerifier(cfg.OpenMeterWebhookSecrets, cfg.OpenMeterToleranceSecs),
+		collectShared: webhook.NewSharedSecretVerifier(cfg.CollectRequestSecrets),
+		now:           time.Now,
 	}
 }
 
-// Routes returns the HTTP surface: two webhook endpoints, liveness, readiness
-// and metrics.
+// Routes returns the HTTP surface: the two webhook endpoints, the pymthouse
+// collect-request endpoint, liveness, readiness and metrics.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /webhooks/stripe", s.handleStripe)
 	mux.HandleFunc("POST /webhooks/openmeter", s.handleOpenMeter)
+	mux.HandleFunc("POST /requests/collect", s.handleCollectRequest)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok")
@@ -134,6 +138,39 @@ func (s *Server) handleOpenMeter(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.accept(w, r, events.SourceOpenMeter, s.cfg.Kafka.TopicOpenMeter, body)
+}
+
+// handleCollectRequest accepts a pymthouse-originated "raise this customer
+// now" request. Authenticated by shared secret, not a webhook signature —
+// pymthouse is a known first party asking us to act, not a third party whose
+// delivery we need to audit-verify — but otherwise runs through the identical
+// verify-then-publish shape as the two provider webhooks, so it gets the same
+// audit trail and lands in the same per-customer lane as everything else for
+// that customer.
+func (s *Server) handleCollectRequest(w http.ResponseWriter, r *http.Request) {
+	start := s.now()
+	defer func() {
+		metrics.WebhookDuration.WithLabelValues(events.SourceCollectRequest).Observe(time.Since(start).Seconds())
+	}()
+
+	if !s.collectShared.Enabled() {
+		s.reject(w, events.SourceCollectRequest, "not_configured", http.StatusServiceUnavailable,
+			"collect requests are not configured", nil)
+		return
+	}
+
+	body, ok := s.readBody(w, r, events.SourceCollectRequest)
+	if !ok {
+		return
+	}
+
+	presented := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if err := s.collectShared.Verify(presented); err != nil {
+		s.reject(w, events.SourceCollectRequest, "bad_secret", http.StatusUnauthorized, "invalid secret", err)
+		return
+	}
+
+	s.accept(w, r, events.SourceCollectRequest, s.cfg.Kafka.TopicCollectRequest, body)
 }
 
 // readBody reads at most MaxBodyBytes of the request. The cap is a defence

@@ -229,6 +229,48 @@ func TestDraftSyncRefusesWhenTotalsDisagree(t *testing.T) {
 	}
 }
 
+// Real Stripe observed in practice: a non-zero invoice can finalize (status
+// "open") before its automatic-collection PaymentIntent is attached, so
+// PrimaryPaymentIntent briefly has nothing to find even after the one
+// existing re-read. That must be retryable, not permanent — the DLQ is not
+// where a transient few-second window belongs, and the reconciliation sweep
+// is a 15-minute backstop, not the first line of defense.
+func TestIssuingSyncMissingPaymentReferenceIsRetryableNotPermanent(t *testing.T) {
+	om, sc := newFakeOpenMeter(t), newFakeStripe(t)
+
+	invoice := draftInvoice()
+	om.putInvoice(invoice)
+	om.putCustomerMetadata("cus_om_1", openmeter.Metadata{})
+	settler := newTestSettler(t, om, sc, nil)
+
+	if _, err := settler.HandleOpenMeterNotification(context.Background(),
+		notificationFor(t, invoice.ID, "invoice.updated")); err != nil {
+		t.Fatalf("draft sync: %v", err)
+	}
+
+	stripeInvoice := sc.onlyInvoice(t)
+	invoice.Status = openmeter.StatusIssuing
+	invoice.StatusDetails.ExtendedStatus = "issuing.sync"
+	invoice.ExternalIDs.Invoicing = stripeInvoice.ID
+	om.putInvoice(invoice)
+
+	// Both the finalize response and the code's own re-read after it must
+	// see no payment reference, since issuingSync re-reads once already.
+	sc.OmitPaymentOnFinalize(2)
+
+	_, err := settler.HandleOpenMeterNotification(context.Background(),
+		notificationFor(t, invoice.ID, "invoice.updated"))
+	if err == nil {
+		t.Fatal("expected a missing-payment-reference error")
+	}
+	if faults.IsPermanent(err) {
+		t.Fatalf("missing payment reference on a non-zero invoice must be retryable, got permanent: %v", err)
+	}
+	if !strings.Contains(err.Error(), "no payment reference") {
+		t.Errorf("error = %v, want it to mention the missing payment reference", err)
+	}
+}
+
 func TestIssuingSyncFinalizesAndReportsNumberAndPayment(t *testing.T) {
 	om, sc := newFakeOpenMeter(t), newFakeStripe(t)
 
@@ -279,6 +321,9 @@ func TestIssuingSyncFinalizesAndReportsNumberAndPayment(t *testing.T) {
 	}
 	if body.Payment.ExternalID != pi {
 		t.Errorf("payment external id = %+v, want the PaymentIntent %q", body.Payment, pi)
+	}
+	if got := sc.callCount("POST", "/v1/payment_intents/"+pi+"/confirm"); got != 1 {
+		t.Errorf("confirm payment intent calls = %d, want 1", got)
 	}
 }
 
@@ -517,6 +562,21 @@ func TestConflictOnCompletionIsTreatedAsSuccess(t *testing.T) {
 
 	if _, err := settler.HandleStripeEvent(context.Background(), body); err != nil {
 		t.Fatalf("a 409 should be a success, got: %v", err)
+	}
+}
+
+// OpenMeter often returns a non-409 4xx for already-paid trigger_paid; that
+// must also ack so webhook redeliveries do not fill the DLQ.
+func TestAlreadyPaidTriggerIsTreatedAsSuccess(t *testing.T) {
+	om, sc := newFakeOpenMeter(t), newFakeStripe(t)
+	settler := newTestSettler(t, om, sc, nil)
+	om.alreadyPaidOn = true
+
+	body := []byte(`{"id":"evt_1","type":"invoice.paid","data":{"object":{"id":"in_1",
+		"metadata":{"` + MetaInvoiceID + `":"inv_om_1"}}}}`)
+
+	if _, err := settler.HandleStripeEvent(context.Background(), body); err != nil {
+		t.Fatalf("already-paid 4xx should be a success, got: %v", err)
 	}
 }
 
