@@ -7,11 +7,14 @@
 # startCommand that invokes `rpk redpanda start ...` (Railway image deploys
 # replace ENTRYPOINT; bare `redpanda` hits the C++ binary which rejects
 # --kafka-addr).
+#
+# Railway builds this file with repo-root context (dockerfilePath
+# deploy/kafka/Dockerfile, no rootDirectory). COPY paths are repo-root relative.
 FROM redpandadata/redpanda:v24.2.4
 
 USER root
 
-COPY start.sh /usr/local/bin/settlement-kafka-start.sh
+COPY deploy/kafka/start.sh /usr/local/bin/settlement-kafka-start.sh
 RUN chmod +x /usr/local/bin/settlement-kafka-start.sh
 
 # Admin API binds to 127.0.0.1 by default (see start.sh). Override with
