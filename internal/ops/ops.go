@@ -37,6 +37,11 @@ type InspectRecord struct {
 	BodyText  string          `json:"body_text,omitempty"`
 }
 
+// MaxInspectCount caps InspectInput.Count. It comes straight from operator
+// and admin-console query input, so an unbounded value would let a single
+// request drive an arbitrarily large allocation (CWE-789).
+const MaxInspectCount = 1000
+
 // InspectInput selects messages to read from a partition.
 type InspectInput struct {
 	Topic     string
@@ -46,14 +51,24 @@ type InspectInput struct {
 	Full      bool
 }
 
+// clampInspectCount applies the default and ceiling for InspectInput.Count.
+// Pulled out of Inspect so the bound is unit-testable without a broker.
+func clampInspectCount(n int) int {
+	if n <= 0 {
+		return 10
+	}
+	if n > MaxInspectCount {
+		return MaxInspectCount
+	}
+	return n
+}
+
 // Inspect reads up to Count messages from a topic partition.
 func Inspect(ctx context.Context, opts config.Kafka, in InspectInput) ([]InspectRecord, error) {
 	if in.Topic == "" {
 		return nil, errors.New("topic is required")
 	}
-	if in.Count <= 0 {
-		in.Count = 10
-	}
+	in.Count = clampInspectCount(in.Count)
 
 	reader, err := kafkax.NewPartitionReader(opts, in.Topic, in.Partition, in.Offset)
 	if err != nil {

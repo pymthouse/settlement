@@ -80,6 +80,52 @@ func TestLoginSetsCookie(t *testing.T) {
 	}
 }
 
+func TestLoginRedirectRejectsOffSiteNext(t *testing.T) {
+	// go/unvalidated-url-redirection: "next" must never send the browser
+	// off the admin console's own origin.
+	cases := []string{
+		"https://evil.example/phish",
+		"http://evil.example/phish",
+		"//evil.example/phish",
+		`/\evil.example`,
+		"evil.example",
+	}
+	h := Handler(Deps{Admin: config.Admin{Token: "secret"}})
+	for _, next := range cases {
+		t.Run(next, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader("token=secret&next="+next))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if loc := rec.Header().Get("Location"); loc != adminHome {
+				t.Fatalf("Location = %q, want fallback to %q", loc, adminHome)
+			}
+		})
+	}
+}
+
+func TestLoginRedirectAllowsOnSiteNext(t *testing.T) {
+	h := Handler(Deps{Admin: config.Admin{Token: "secret"}})
+	req := httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader("token=secret&next=/admin/dlq"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if loc := rec.Header().Get("Location"); loc != "/admin/dlq" {
+		t.Fatalf("Location = %q, want /admin/dlq", loc)
+	}
+}
+
+func TestLoginRedirectPreservesQueryOnAllowedPath(t *testing.T) {
+	h := Handler(Deps{Admin: config.Admin{Token: "secret"}})
+	req := httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader("token=secret&next=/admin/invoice%3Fid%3Dinv_lookup"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if loc := rec.Header().Get("Location"); loc != "/admin/invoice?id=inv_lookup" {
+		t.Fatalf("Location = %q, want /admin/invoice?id=inv_lookup", loc)
+	}
+}
+
 func TestRedriveRequiresConfirm(t *testing.T) {
 	h := Handler(Deps{
 		Admin: config.Admin{Token: "secret"},

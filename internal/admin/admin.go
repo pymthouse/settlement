@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +33,19 @@ const (
 	adminHome    = "/admin/"
 	adminLogin   = "/admin/login"
 )
+
+// Post-login redirects are limited to these admin console GET pages.
+// slices.Contains against this list is Sonar/CodeQL's recommended allow-list
+// sanitizer for open-redirect rules; dynamic path-prefix checks are not
+// recognized.
+var allowedLoginRedirects = []string{
+	adminHome,
+	"/admin",
+	"/admin/invoice",
+	"/admin/dlq",
+	"/admin/replay",
+	"/admin/links",
+}
 
 //go:embed all:ui
 var uiFS embed.FS
@@ -195,11 +209,19 @@ func (s *server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 		Secure:   true,
 	})
+	redirect := adminHome
 	next := r.FormValue("next")
-	if next == "" || !strings.HasPrefix(next, adminRoot) {
-		next = adminHome
+	if next != "" && !strings.ContainsRune(next, '\\') {
+		if u, err := url.Parse(next); err == nil && u.Hostname() == "" && u.Scheme == "" {
+			if slices.Contains(allowedLoginRedirects, u.Path) {
+				redirect = u.Path
+				if u.RawQuery != "" {
+					redirect += "?" + u.RawQuery
+				}
+			}
+		}
 	}
-	http.Redirect(w, r, next, http.StatusSeeOther)
+	http.Redirect(w, r, redirect, http.StatusSeeOther)
 }
 
 func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -379,6 +401,9 @@ func (s *server) handleDLQGet(w http.ResponseWriter, r *http.Request) {
 	count, _ := strconv.Atoi(r.URL.Query().Get("count"))
 	if count <= 0 {
 		count = 25
+	}
+	if count > ops.MaxInspectCount {
+		count = ops.MaxInspectCount
 	}
 	offset := ops.FirstOffset
 	if v := r.URL.Query().Get("offset"); v != "" {
