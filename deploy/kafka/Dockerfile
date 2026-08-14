@@ -11,6 +11,9 @@ FROM redpandadata/redpanda:v24.2.4
 # Railway builds this file with repo-root context (dockerfilePath
 # deploy/kafka/Dockerfile, no rootDirectory). COPY paths are repo-root relative.
 # The base image USER is 101, so switch to root before COPY/chmod.
+# Runtime drops back to uid 101 via entrypoint.sh after chowning the volume.
+# Sonar docker:S6471 is accepted: Railway volume mounts are root-owned and the
+# image cannot chmod/COPY as 101; see sonar-project.properties ignore.
 USER root
 
 COPY deploy/kafka/entrypoint.sh /entrypoint.sh

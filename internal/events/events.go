@@ -89,11 +89,11 @@ type stripeEventData struct {
 
 // stripeEvent is the subset of a Stripe event the doorman needs.
 type stripeEvent struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"`
-	Account  string `json:"account"`
-	Livemode bool   `json:"livemode"`
-	Object   string `json:"object"`
+	ID       string          `json:"id"`
+	Type     string          `json:"type"`
+	Account  string          `json:"account"`
+	Livemode bool            `json:"livemode"`
+	Object   string          `json:"object"`
 	Data     stripeEventData `json:"data"`
 }
 

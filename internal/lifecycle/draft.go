@@ -273,7 +273,10 @@ func (s *Settler) syncBillableLines(
 				return lineMapping{}, 0, nil, err
 			}
 		} else if item.Amount != amount {
-			item, err = s.replaceStaleLineItem(ctx, inv, tgt, customerID, stripeInvoiceID, line, item, amount)
+			if err := s.stripe.DeleteInvoiceItem(ctx, item.ID, tgt.requestOptions("")); err != nil {
+				return lineMapping{}, 0, nil, fmt.Errorf("replace stale invoice item %s: %w", item.ID, err)
+			}
+			item, err = s.createLineItem(ctx, inv, tgt, customerID, stripeInvoiceID, line, amount)
 			if err != nil {
 				return lineMapping{}, 0, nil, err
 			}
@@ -295,21 +298,6 @@ func (s *Settler) syncBillableLines(
 		}
 	}
 	return mapping, itemsTotal, matched, nil
-}
-
-func (s *Settler) replaceStaleLineItem(
-	ctx context.Context,
-	inv *openmeter.Invoice,
-	tgt target,
-	customerID, stripeInvoiceID string,
-	line openmeter.Line,
-	item stripe.InvoiceItem,
-	amount int64,
-) (stripe.InvoiceItem, error) {
-	if err := s.stripe.DeleteInvoiceItem(ctx, item.ID, tgt.requestOptions("")); err != nil {
-		return stripe.InvoiceItem{}, fmt.Errorf("replace stale invoice item %s: %w", item.ID, err)
-	}
-	return s.createLineItem(ctx, inv, tgt, customerID, stripeInvoiceID, line, amount)
 }
 
 func (s *Settler) deleteOrphanedInvoiceItems(

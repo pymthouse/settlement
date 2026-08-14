@@ -27,7 +27,7 @@ import (
 
 const invoicesAPIPrefix = "/v1/invoices/"
 
-func invoiceAPIPath(id string, suffix string) string {
+func invoiceAPIPath(id, suffix string) string {
 	return invoicesAPIPrefix + url.PathEscape(id) + suffix
 }
 

@@ -311,20 +311,31 @@ func validateWorker(w Worker, errs *[]error) {
 	if w.OpenMeter.BaseURL == "" {
 		*errs = append(*errs, errors.New("SETTLEMENT_OPENMETER_URL is required"))
 	}
-	if w.Stripe.SecretKey == "" {
+	validateWorkerStripe(w.Stripe, errs)
+	validateWorkerRuntime(w, errs)
+}
+
+func validateWorkerStripe(s Stripe, errs *[]error) {
+	if s.SecretKey == "" {
 		*errs = append(*errs, errors.New("SETTLEMENT_STRIPE_SECRET_KEY is required"))
 	}
-	if !ValidChargeModel(w.Stripe.DefaultChargeModel) {
-		*errs = append(*errs, fmt.Errorf("SETTLEMENT_STRIPE_CHARGE_MODEL %q must be one of direct, destination, platform", w.Stripe.DefaultChargeModel))
+	if !ValidChargeModel(s.DefaultChargeModel) {
+		*errs = append(*errs, fmt.Errorf("SETTLEMENT_STRIPE_CHARGE_MODEL %q must be one of direct, destination, platform", s.DefaultChargeModel))
 	}
-	if w.Stripe.ApplicationFeeBps < 0 || w.Stripe.ApplicationFeeBps > 10_000 {
+	if s.ApplicationFeeBps < 0 || s.ApplicationFeeBps > 10_000 {
 		*errs = append(*errs, errors.New("SETTLEMENT_APPLICATION_FEE_BPS must be between 0 and 10000"))
 	}
-	switch w.Stripe.CollectionMethod {
+	if s.ApplicationFeeFlatMinor < 0 {
+		*errs = append(*errs, errors.New("SETTLEMENT_APPLICATION_FEE_FLAT_MINOR must be >= 0"))
+	}
+	switch s.CollectionMethod {
 	case "charge_automatically", "send_invoice":
 	default:
-		*errs = append(*errs, fmt.Errorf("SETTLEMENT_STRIPE_COLLECTION_METHOD %q must be charge_automatically or send_invoice", w.Stripe.CollectionMethod))
+		*errs = append(*errs, fmt.Errorf("SETTLEMENT_STRIPE_COLLECTION_METHOD %q must be charge_automatically or send_invoice", s.CollectionMethod))
 	}
+}
+
+func validateWorkerRuntime(w Worker, errs *[]error) {
 	if w.Lanes <= 0 {
 		*errs = append(*errs, errors.New("SETTLEMENT_LANES must be positive"))
 	}
@@ -357,9 +368,6 @@ func validateWorker(w Worker, errs *[]error) {
 	}
 	if w.ReconcilePageSize < 1 {
 		*errs = append(*errs, errors.New("SETTLEMENT_RECONCILE_PAGE_SIZE must be >= 1"))
-	}
-	if w.Stripe.ApplicationFeeFlatMinor < 0 {
-		*errs = append(*errs, errors.New("SETTLEMENT_APPLICATION_FEE_FLAT_MINOR must be >= 0"))
 	}
 }
 
