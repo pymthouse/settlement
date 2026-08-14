@@ -303,60 +303,64 @@ func LoadWorker() (Worker, error) {
 		},
 	}
 
+	validateWorker(w, &errs)
+	return w, errors.Join(errs...)
+}
+
+func validateWorker(w Worker, errs *[]error) {
 	if w.OpenMeter.BaseURL == "" {
-		errs = append(errs, errors.New("SETTLEMENT_OPENMETER_URL is required"))
+		*errs = append(*errs, errors.New("SETTLEMENT_OPENMETER_URL is required"))
 	}
 	if w.Stripe.SecretKey == "" {
-		errs = append(errs, errors.New("SETTLEMENT_STRIPE_SECRET_KEY is required"))
+		*errs = append(*errs, errors.New("SETTLEMENT_STRIPE_SECRET_KEY is required"))
 	}
 	if !ValidChargeModel(w.Stripe.DefaultChargeModel) {
-		errs = append(errs, fmt.Errorf("SETTLEMENT_STRIPE_CHARGE_MODEL %q must be one of direct, destination, platform", w.Stripe.DefaultChargeModel))
+		*errs = append(*errs, fmt.Errorf("SETTLEMENT_STRIPE_CHARGE_MODEL %q must be one of direct, destination, platform", w.Stripe.DefaultChargeModel))
 	}
 	if w.Stripe.ApplicationFeeBps < 0 || w.Stripe.ApplicationFeeBps > 10_000 {
-		errs = append(errs, errors.New("SETTLEMENT_APPLICATION_FEE_BPS must be between 0 and 10000"))
+		*errs = append(*errs, errors.New("SETTLEMENT_APPLICATION_FEE_BPS must be between 0 and 10000"))
 	}
 	switch w.Stripe.CollectionMethod {
 	case "charge_automatically", "send_invoice":
 	default:
-		errs = append(errs, fmt.Errorf("SETTLEMENT_STRIPE_COLLECTION_METHOD %q must be charge_automatically or send_invoice", w.Stripe.CollectionMethod))
+		*errs = append(*errs, fmt.Errorf("SETTLEMENT_STRIPE_COLLECTION_METHOD %q must be charge_automatically or send_invoice", w.Stripe.CollectionMethod))
 	}
 	if w.Lanes <= 0 {
-		errs = append(errs, errors.New("SETTLEMENT_LANES must be positive"))
+		*errs = append(*errs, errors.New("SETTLEMENT_LANES must be positive"))
 	}
 	if w.MaxAttempts <= 0 {
-		errs = append(errs, errors.New("SETTLEMENT_MAX_ATTEMPTS must be positive"))
+		*errs = append(*errs, errors.New("SETTLEMENT_MAX_ATTEMPTS must be positive"))
 	}
 	switch w.OnRetryExhausted {
 	case PolicyDLQ, PolicyHalt:
 	default:
-		errs = append(errs, fmt.Errorf("SETTLEMENT_ON_RETRY_EXHAUSTED %q must be dlq or halt", w.OnRetryExhausted))
+		*errs = append(*errs, fmt.Errorf("SETTLEMENT_ON_RETRY_EXHAUSTED %q must be dlq or halt", w.OnRetryExhausted))
 	}
 	switch w.StartOffset {
 	case "first", "last":
 	default:
-		errs = append(errs, fmt.Errorf("SETTLEMENT_START_OFFSET %q must be first or last", w.StartOffset))
+		*errs = append(*errs, fmt.Errorf("SETTLEMENT_START_OFFSET %q must be first or last", w.StartOffset))
 	}
 	if w.Kafka.ConsumerGroup == "" {
-		errs = append(errs, errors.New("SETTLEMENT_KAFKA_CONSUMER_GROUP is required"))
+		*errs = append(*errs, errors.New("SETTLEMENT_KAFKA_CONSUMER_GROUP is required"))
 	}
 	if w.RetryJitter < 0 || w.RetryJitter >= 1 {
-		errs = append(errs, errors.New("SETTLEMENT_RETRY_JITTER must be in [0, 1)"))
+		*errs = append(*errs, errors.New("SETTLEMENT_RETRY_JITTER must be in [0, 1)"))
 	}
 	if w.LaneBuffer < 0 {
-		errs = append(errs, errors.New("SETTLEMENT_LANE_BUFFER must be >= 0"))
+		*errs = append(*errs, errors.New("SETTLEMENT_LANE_BUFFER must be >= 0"))
 	}
 	switch w.Kafka.RequiredAcks {
 	case -1, 0, 1:
 	default:
-		errs = append(errs, errors.New("SETTLEMENT_KAFKA_REQUIRED_ACKS must be -1, 0, or 1"))
+		*errs = append(*errs, errors.New("SETTLEMENT_KAFKA_REQUIRED_ACKS must be -1, 0, or 1"))
 	}
 	if w.ReconcilePageSize < 1 {
-		errs = append(errs, errors.New("SETTLEMENT_RECONCILE_PAGE_SIZE must be >= 1"))
+		*errs = append(*errs, errors.New("SETTLEMENT_RECONCILE_PAGE_SIZE must be >= 1"))
 	}
 	if w.Stripe.ApplicationFeeFlatMinor < 0 {
-		errs = append(errs, errors.New("SETTLEMENT_APPLICATION_FEE_FLAT_MINOR must be >= 0"))
+		*errs = append(*errs, errors.New("SETTLEMENT_APPLICATION_FEE_FLAT_MINOR must be >= 0"))
 	}
-	return w, errors.Join(errs...)
 }
 
 func loadKafka(errs *[]error) Kafka {

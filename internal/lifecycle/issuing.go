@@ -28,26 +28,9 @@ func (s *Settler) issuingSync(ctx context.Context, inv *openmeter.Invoice) error
 		return err
 	}
 
-	stripeInvoiceID := inv.ExternalIDs.Invoicing
-	if stripeInvoiceID == "" {
-		// Draft sync either never ran or its response was lost. Recover by
-		// searching rather than creating: a second invoice here would be a
-		// duplicate charge, not a missing one.
-		query := fmt.Sprintf("metadata['%s']:'%s'", MetaInvoiceID, escapeSearch(inv.ID))
-		found, searchErr := s.stripe.SearchInvoices(ctx, query, tgt.requestOptions(""))
-		if searchErr != nil {
-			return fmt.Errorf("search stripe invoices for %s: %w", inv.ID, searchErr)
-		}
-		for i := range found {
-			if found[i].Status != "void" {
-				stripeInvoiceID = found[i].ID
-				break
-			}
-		}
-	}
-	if stripeInvoiceID == "" {
-		return faults.Permanentf("missing_stripe_invoice",
-			"invoice %s reached issuing with no Stripe invoice; re-drive the draft sync hook", inv.ID)
+	stripeInvoiceID, err := s.lookupStripeInvoiceID(ctx, inv, tgt)
+	if err != nil {
+		return err
 	}
 
 	stripeInvoice, err := s.stripe.GetInvoice(ctx, stripeInvoiceID, tgt.requestOptions(""))
@@ -55,91 +38,119 @@ func (s *Settler) issuingSync(ctx context.Context, inv *openmeter.Invoice) error
 		return classify("stripe_invoice_unreadable", fmt.Errorf("read stripe invoice %s: %w", stripeInvoiceID, err))
 	}
 
-	if stripeInvoice.Status == "draft" {
-		if err := s.applyApplicationFee(ctx, inv, tgt, stripeInvoice); err != nil {
-			return classify("application_fee_rejected", err)
-		}
-
-		// Finalization is the irreversible step: it assigns the number and
-		// starts collection. The idempotency key makes a redelivery a no-op
-		// rather than a second attempt at an already-open invoice.
-		finalized, err := s.stripe.FinalizeInvoice(ctx, stripeInvoiceID, s.cfg.AutoAdvance,
-			tgt.requestOptions("settlement-finalize-"+inv.ID))
-		if err != nil {
-			return classify("stripe_finalize_rejected",
-				fmt.Errorf("finalize stripe invoice %s: %w", stripeInvoiceID, err))
-		}
-		stripeInvoice = finalized
-		s.log.Info("finalized stripe invoice",
-			"invoice_id", inv.ID,
-			"stripe_invoice", stripeInvoice.ID,
-			"stripe_number", stripeInvoice.Number,
-			"total_minor", stripeInvoice.Total,
-			"application_fee_minor", stripeInvoice.ApplicationFee,
-		)
-	}
-
 	if stripeInvoice.Status == "void" {
-		// Ops / Stripe may void while OM is still at issuing.sync. Finish the
-		// hook with the Stripe invoice id as payment ref, then void in OM.
-		s.log.Warn("stripe invoice already void during issuing sync; voiding openmeter invoice",
-			"invoice_id", inv.ID, "stripe_invoice", stripeInvoice.ID)
-		issuedAt := s.now()
-		body := openmeter.FinalizedRequest{
-			Invoicing: &openmeter.FinalizedInvoicingRequest{
-				InvoiceNumber:   stripeInvoice.Number,
-				SentToCustomerA: &issuedAt,
-			},
-			Payment: &openmeter.FinalizedPaymentRequest{ExternalID: stripeInvoice.ID},
-		}
-		if err := s.om.IssuingSynchronized(ctx, inv.ID, body); err != nil && !openmeter.IsConflict(err) {
-			return fmt.Errorf("issuing synchronized %s (void stripe): %w", inv.ID, err)
-		}
-		if err := s.om.UpdatePaymentStatus(ctx, inv.ID, openmeter.TriggerVoid); err != nil && !openmeter.IsAlreadyApplied(err) {
-			return fmt.Errorf("void after stripe void for %s: %w", inv.ID, err)
-		}
-		return nil
+		return s.voidIssuingSync(ctx, inv, tgt, stripeInvoice)
 	}
 
-	// Re-read after finalize so payments / confirmation_secret are present;
-	// finalize responses can omit them briefly for automatic collection.
+	stripeInvoice, err = s.finalizeDraftStripeInvoice(ctx, inv, tgt, stripeInvoice)
+	if err != nil {
+		return err
+	}
+
+	// Re-read after finalize so payments / confirmation_secret are present.
 	if refreshed, err := s.stripe.GetInvoice(ctx, stripeInvoice.ID, tgt.requestOptions("")); err == nil {
 		stripeInvoice = refreshed
 	}
 
 	confirmErr := s.confirmPaymentIntentIfNeeded(ctx, inv, tgt, stripeInvoice)
 
+	if err := s.reportIssuingSynchronized(ctx, inv, stripeInvoice); err != nil {
+		return err
+	}
+
+	if confirmErr != nil {
+		return s.handleIssuingConfirmError(ctx, inv, confirmErr)
+	}
+	return nil
+}
+
+func (s *Settler) lookupStripeInvoiceID(ctx context.Context, inv *openmeter.Invoice, tgt target) (string, error) {
+	stripeInvoiceID := inv.ExternalIDs.Invoicing
+	if stripeInvoiceID != "" {
+		return stripeInvoiceID, nil
+	}
+
+	query := fmt.Sprintf("metadata['%s']:'%s'", MetaInvoiceID, escapeSearch(inv.ID))
+	found, searchErr := s.stripe.SearchInvoices(ctx, query, tgt.requestOptions(""))
+	if searchErr != nil {
+		return "", fmt.Errorf("search stripe invoices for %s: %w", inv.ID, searchErr)
+	}
+	for i := range found {
+		if found[i].Status != "void" {
+			return found[i].ID, nil
+		}
+	}
+	return "", faults.Permanentf("missing_stripe_invoice",
+		"invoice %s reached issuing with no Stripe invoice; re-drive the draft sync hook", inv.ID)
+}
+
+func (s *Settler) finalizeDraftStripeInvoice(
+	ctx context.Context,
+	inv *openmeter.Invoice,
+	tgt target,
+	stripeInvoice *stripe.Invoice,
+) (*stripe.Invoice, error) {
+	if stripeInvoice.Status != "draft" {
+		return stripeInvoice, nil
+	}
+
+	if err := s.applyApplicationFee(ctx, inv, tgt, stripeInvoice); err != nil {
+		return nil, classify("application_fee_rejected", err)
+	}
+
+	finalized, err := s.stripe.FinalizeInvoice(ctx, stripeInvoice.ID, s.cfg.AutoAdvance,
+		tgt.requestOptions("settlement-finalize-"+inv.ID))
+	if err != nil {
+		return nil, classify("stripe_finalize_rejected",
+			fmt.Errorf("finalize stripe invoice %s: %w", stripeInvoice.ID, err))
+	}
+	s.log.Info("finalized stripe invoice",
+		"invoice_id", inv.ID,
+		"stripe_invoice", finalized.ID,
+		"stripe_number", finalized.Number,
+		"total_minor", finalized.Total,
+		"application_fee_minor", finalized.ApplicationFee,
+	)
+	return finalized, nil
+}
+
+func (s *Settler) voidIssuingSync(
+	ctx context.Context,
+	inv *openmeter.Invoice,
+	tgt target,
+	stripeInvoice *stripe.Invoice,
+) error {
+	s.log.Warn("stripe invoice already void during issuing sync; voiding openmeter invoice",
+		"invoice_id", inv.ID, "stripe_invoice", stripeInvoice.ID)
 	issuedAt := s.now()
 	body := openmeter.FinalizedRequest{
 		Invoicing: &openmeter.FinalizedInvoicingRequest{
-			// Carry Stripe's number across so the two systems agree on what
-			// the customer will quote back to support. When Stripe has not
-			// assigned one, OpenMeter generates an INV- number instead.
+			InvoiceNumber:   stripeInvoice.Number,
+			SentToCustomerA: &issuedAt,
+		},
+		Payment: &openmeter.FinalizedPaymentRequest{ExternalID: stripeInvoice.ID},
+	}
+	if err := s.om.IssuingSynchronized(ctx, inv.ID, body); err != nil && !openmeter.IsConflict(err) {
+		return fmt.Errorf("issuing synchronized %s (void stripe): %w", inv.ID, err)
+	}
+	if err := s.om.UpdatePaymentStatus(ctx, inv.ID, openmeter.TriggerVoid); err != nil && !openmeter.IsAlreadyApplied(err) {
+		return fmt.Errorf("void after stripe void for %s: %w", inv.ID, err)
+	}
+	return nil
+}
+
+func (s *Settler) reportIssuingSynchronized(ctx context.Context, inv *openmeter.Invoice, stripeInvoice *stripe.Invoice) error {
+	issuedAt := s.now()
+	body := openmeter.FinalizedRequest{
+		Invoicing: &openmeter.FinalizedInvoicingRequest{
 			InvoiceNumber:   stripeInvoice.Number,
 			SentToCustomerA: &issuedAt,
 		},
 	}
-	ref, err := paymentReference(stripeInvoice)
+
+	ref, err := s.resolvePaymentRefForIssuing(inv, stripeInvoice)
 	if err != nil {
-		// $0 invoices often finalize as paid with no PaymentIntent. Stamp the
-		// Stripe invoice id so issuing sync can complete.
-		if stripeInvoice.Total == 0 || stripeInvoice.AmountDue == 0 {
-			ref = stripeInvoice.ID
-			s.log.Info("using stripe invoice as payment reference for zero-amount invoice",
-				"invoice_id", inv.ID, "stripe_invoice", stripeInvoice.ID)
-		} else {
-			// Not permanent: for automatic collection, Stripe attaches the
-			// PaymentIntent asynchronously just after finalize, and the
-			// single re-read above is not always enough to catch it —
-			// observed in practice landing in the DLQ within a couple of
-			// seconds of finalizing, well before Stripe had attached
-			// anything to retry against. Letting the normal retry ladder
-			// (backoff up to ~60s, see SETTLEMENT_RETRY_*) run gives that
-			// window time to close; the reconciliation sweep is still the
-			// backstop if it genuinely never arrives.
-			return fmt.Errorf("invoice %s: finalized stripe invoice %s has no payment reference yet: %w",
-				inv.ID, stripeInvoice.ID, err)
-		}
+		return err
 	}
 	body.Payment = &openmeter.FinalizedPaymentRequest{ExternalID: ref}
 
@@ -147,36 +158,48 @@ func (s *Settler) issuingSync(ctx context.Context, inv *openmeter.Invoice) error
 		if openmeter.IsConflict(err) {
 			metrics.InvoiceStateTransitions.WithLabelValues(HandlerIssuingSync, "already_applied").Inc()
 			s.log.Info("issuing already synchronized", "invoice_id", inv.ID)
-		} else {
-			metrics.InvoiceStateTransitions.WithLabelValues(HandlerIssuingSync, "error").Inc()
-			return fmt.Errorf("issuing synchronized %s: %w", inv.ID, err)
-		}
-	} else {
-		metrics.InvoiceStateTransitions.WithLabelValues(HandlerIssuingSync, "ok").Inc()
-		s.log.Info("issuing synchronized",
-			"invoice_id", inv.ID,
-			"stripe_invoice", stripeInvoice.ID,
-			"invoice_number", stripeInvoice.Number,
-			"payment_reference", ref,
-		)
-	}
-
-	// Decline during confirm must not leave the invoice in issuing.failed —
-	// sync first, then mark payment_failed so the customer can retry/update PM.
-	if confirmErr != nil {
-		if isCardDecline(confirmErr) {
-			s.log.Warn("payment intent declined during issuing; marking payment_failed",
-				"invoice_id", inv.ID, "error", confirmErr)
-			if payErr := s.om.UpdatePaymentStatus(ctx, inv.ID, openmeter.TriggerPaymentFailed); payErr != nil {
-				if !openmeter.IsAlreadyApplied(payErr) {
-					return fmt.Errorf("payment_failed after decline for %s: %w", inv.ID, payErr)
-				}
-			}
 			return nil
 		}
-		return confirmErr
+		metrics.InvoiceStateTransitions.WithLabelValues(HandlerIssuingSync, "error").Inc()
+		return fmt.Errorf("issuing synchronized %s: %w", inv.ID, err)
 	}
+
+	metrics.InvoiceStateTransitions.WithLabelValues(HandlerIssuingSync, "ok").Inc()
+	s.log.Info("issuing synchronized",
+		"invoice_id", inv.ID,
+		"stripe_invoice", stripeInvoice.ID,
+		"invoice_number", stripeInvoice.Number,
+		"payment_reference", ref,
+	)
 	return nil
+}
+
+func (s *Settler) resolvePaymentRefForIssuing(inv *openmeter.Invoice, stripeInvoice *stripe.Invoice) (string, error) {
+	ref, err := paymentReference(stripeInvoice)
+	if err == nil {
+		return ref, nil
+	}
+	if stripeInvoice.Total == 0 || stripeInvoice.AmountDue == 0 {
+		s.log.Info("using stripe invoice as payment reference for zero-amount invoice",
+			"invoice_id", inv.ID, "stripe_invoice", stripeInvoice.ID)
+		return stripeInvoice.ID, nil
+	}
+	return "", fmt.Errorf("invoice %s: finalized stripe invoice %s has no payment reference yet: %w",
+		inv.ID, stripeInvoice.ID, err)
+}
+
+func (s *Settler) handleIssuingConfirmError(ctx context.Context, inv *openmeter.Invoice, confirmErr error) error {
+	if isCardDecline(confirmErr) {
+		s.log.Warn("payment intent declined during issuing; marking payment_failed",
+			"invoice_id", inv.ID, "error", confirmErr)
+		if payErr := s.om.UpdatePaymentStatus(ctx, inv.ID, openmeter.TriggerPaymentFailed); payErr != nil {
+			if !openmeter.IsAlreadyApplied(payErr) {
+				return fmt.Errorf("payment_failed after decline for %s: %w", inv.ID, payErr)
+			}
+		}
+		return nil
+	}
+	return confirmErr
 }
 
 // confirmPaymentIntentIfNeeded off-session confirms a PI left at

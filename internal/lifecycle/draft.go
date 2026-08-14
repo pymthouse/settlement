@@ -126,9 +126,9 @@ func (s *Settler) ensureStripeCustomer(ctx context.Context, inv *openmeter.Invoi
 	if inv.Customer.Name != "" {
 		params.Set("name", inv.Customer.Name)
 	}
-	params.Set("metadata["+MetaCustomerID+"]", inv.Customer.ID)
-	params.Set("metadata["+MetaCustomerKey+"]", inv.Customer.Key)
-	params.Set("metadata["+MetaSource+"]", sourceTag)
+	setStripeMetadata(params, MetaCustomerID, inv.Customer.ID)
+	setStripeMetadata(params, MetaCustomerKey, inv.Customer.Key)
+	setStripeMetadata(params, MetaSource, sourceTag)
 
 	created, err := s.stripe.CreateCustomer(ctx, params,
 		tgt.requestOptions("settlement-customer-"+inv.Customer.ID))
@@ -173,9 +173,9 @@ func (s *Settler) ensureStripeInvoice(ctx context.Context, inv *openmeter.Invoic
 	// Stripe must not advance the invoice on its own: OpenMeter owns the
 	// lifecycle until the issuing hook says otherwise.
 	params.Set("auto_advance", "false")
-	params.Set("metadata["+MetaInvoiceID+"]", inv.ID)
-	params.Set("metadata["+MetaCustomerID+"]", inv.Customer.ID)
-	params.Set("metadata["+MetaSource+"]", sourceTag)
+	setStripeMetadata(params, MetaInvoiceID, inv.ID)
+	setStripeMetadata(params, MetaCustomerID, inv.Customer.ID)
+	setStripeMetadata(params, MetaSource, sourceTag)
 	if inv.Description != "" {
 		params.Set("description", inv.Description)
 	}
@@ -222,13 +222,38 @@ func (s *Settler) syncInvoiceItems(ctx context.Context, inv *openmeter.Invoice, 
 		return lineMapping{}, fmt.Errorf("list stripe invoice items: %w", err)
 	}
 
+	byLine := indexInvoiceItemsByLine(existing)
+	mapping, itemsTotal, matched, err := s.syncBillableLines(ctx, inv, tgt, customerID, stripeInvoiceID, byLine)
+	if err != nil {
+		return lineMapping{}, err
+	}
+
+	if err := s.deleteOrphanedInvoiceItems(ctx, inv, tgt, byLine, matched); err != nil {
+		return lineMapping{}, err
+	}
+	if err := s.reconcileTotal(ctx, inv, tgt, customerID, stripeInvoiceID, byLine, itemsTotal); err != nil {
+		return lineMapping{}, err
+	}
+	return mapping, nil
+}
+
+func indexInvoiceItemsByLine(existing []stripe.InvoiceItem) map[string]stripe.InvoiceItem {
 	byLine := make(map[string]stripe.InvoiceItem, len(existing))
 	for _, item := range existing {
 		if lineID := item.Metadata[MetaLineID]; lineID != "" {
 			byLine[lineID] = item
 		}
 	}
+	return byLine
+}
 
+func (s *Settler) syncBillableLines(
+	ctx context.Context,
+	inv *openmeter.Invoice,
+	tgt target,
+	customerID, stripeInvoiceID string,
+	byLine map[string]stripe.InvoiceItem,
+) (lineMapping, int64, map[string]struct{}, error) {
 	var mapping lineMapping
 	var itemsTotal int64
 	matched := make(map[string]struct{}, len(inv.BillableLines()))
@@ -236,7 +261,7 @@ func (s *Settler) syncInvoiceItems(ctx context.Context, inv *openmeter.Invoice, 
 	for _, line := range inv.BillableLines() {
 		amount, err := money.ToMinorUnits(line.Totals.Total, inv.Currency)
 		if err != nil {
-			return lineMapping{}, faults.Permanentf("bad_line_amount",
+			return lineMapping{}, 0, nil, faults.Permanentf("bad_line_amount",
 				"invoice %s line %s: %v", inv.ID, line.ID, err)
 		}
 
@@ -245,22 +270,12 @@ func (s *Settler) syncInvoiceItems(ctx context.Context, inv *openmeter.Invoice, 
 		if !seen {
 			item, err = s.createLineItem(ctx, inv, tgt, customerID, stripeInvoiceID, line, amount)
 			if err != nil {
-				return lineMapping{}, err
+				return lineMapping{}, 0, nil, err
 			}
 		} else if item.Amount != amount {
-			// The draft was re-synced after a quantity snapshot changed the
-			// numbers. Replace the item rather than leaving a stale amount:
-			// the Stripe invoice must equal the OpenMeter invoice exactly.
-			//
-			// Stripe idempotency keys replay the original response even after
-			// the created object was deleted, so the replacement key must
-			// change (UpdatedAt) or the deleted item would be returned again.
-			if err := s.stripe.DeleteInvoiceItem(ctx, item.ID, tgt.requestOptions("")); err != nil {
-				return lineMapping{}, fmt.Errorf("replace stale invoice item %s: %w", item.ID, err)
-			}
-			item, err = s.createLineItem(ctx, inv, tgt, customerID, stripeInvoiceID, line, amount)
+			item, err = s.replaceStaleLineItem(ctx, inv, tgt, customerID, stripeInvoiceID, line, item, amount)
 			if err != nil {
-				return lineMapping{}, err
+				return lineMapping{}, 0, nil, err
 			}
 		}
 
@@ -268,8 +283,6 @@ func (s *Settler) syncInvoiceItems(ctx context.Context, inv *openmeter.Invoice, 
 		mapping.lines = append(mapping.lines, openmeter.LineExternalIDMapping{
 			LineID: line.ID, ExternalID: item.ID,
 		})
-		// Children and discounts settle inside this item; pointing them at it
-		// is what lets a later reader trace any OpenMeter id into Stripe.
 		for _, childID := range line.ChildIDs() {
 			mapping.lines = append(mapping.lines, openmeter.LineExternalIDMapping{
 				LineID: childID, ExternalID: item.ID,
@@ -281,9 +294,31 @@ func (s *Settler) syncInvoiceItems(ctx context.Context, inv *openmeter.Invoice, 
 			})
 		}
 	}
+	return mapping, itemsTotal, matched, nil
+}
 
-	// Drop Stripe items for lines that are no longer on the OpenMeter invoice.
-	// Preserve the rounding adjustment so reconcileTotal can manage it.
+func (s *Settler) replaceStaleLineItem(
+	ctx context.Context,
+	inv *openmeter.Invoice,
+	tgt target,
+	customerID, stripeInvoiceID string,
+	line openmeter.Line,
+	item stripe.InvoiceItem,
+	amount int64,
+) (stripe.InvoiceItem, error) {
+	if err := s.stripe.DeleteInvoiceItem(ctx, item.ID, tgt.requestOptions("")); err != nil {
+		return stripe.InvoiceItem{}, fmt.Errorf("replace stale invoice item %s: %w", item.ID, err)
+	}
+	return s.createLineItem(ctx, inv, tgt, customerID, stripeInvoiceID, line, amount)
+}
+
+func (s *Settler) deleteOrphanedInvoiceItems(
+	ctx context.Context,
+	inv *openmeter.Invoice,
+	tgt target,
+	byLine map[string]stripe.InvoiceItem,
+	matched map[string]struct{},
+) error {
 	for lineID, item := range byLine {
 		if lineID == roundingLineID {
 			continue
@@ -292,15 +327,11 @@ func (s *Settler) syncInvoiceItems(ctx context.Context, inv *openmeter.Invoice, 
 			continue
 		}
 		if err := s.stripe.DeleteInvoiceItem(ctx, item.ID, tgt.requestOptions("")); err != nil {
-			return lineMapping{}, fmt.Errorf("delete orphaned invoice item %s (line %s): %w", item.ID, lineID, err)
+			return fmt.Errorf("delete orphaned invoice item %s (line %s): %w", item.ID, lineID, err)
 		}
 		delete(byLine, lineID)
 	}
-
-	if err := s.reconcileTotal(ctx, inv, tgt, customerID, stripeInvoiceID, byLine, itemsTotal); err != nil {
-		return lineMapping{}, err
-	}
-	return mapping, nil
+	return nil
 }
 
 func (s *Settler) createLineItem(ctx context.Context, inv *openmeter.Invoice, tgt target, customerID, stripeInvoiceID string, line openmeter.Line, amount int64) (stripe.InvoiceItem, error) {
@@ -310,9 +341,9 @@ func (s *Settler) createLineItem(ctx context.Context, inv *openmeter.Invoice, tg
 	params.Set("currency", strings.ToLower(inv.Currency))
 	params.Set("amount", strconv.FormatInt(amount, 10))
 	params.Set("description", lineDescription(line))
-	params.Set("metadata["+MetaLineID+"]", line.ID)
-	params.Set("metadata["+MetaInvoiceID+"]", inv.ID)
-	params.Set("metadata["+MetaSource+"]", sourceTag)
+	setStripeMetadata(params, MetaLineID, line.ID)
+	setStripeMetadata(params, MetaInvoiceID, inv.ID)
+	setStripeMetadata(params, MetaSource, sourceTag)
 	if line.Period != nil && !line.Period.Start.IsZero() && !line.Period.End.IsZero() {
 		params.Set("period[start]", strconv.FormatInt(line.Period.Start.Unix(), 10))
 		params.Set("period[end]", strconv.FormatInt(line.Period.End.Unix(), 10))
@@ -378,9 +409,9 @@ func (s *Settler) reconcileTotal(ctx context.Context, inv *openmeter.Invoice, tg
 	params.Set("currency", strings.ToLower(inv.Currency))
 	params.Set("amount", strconv.FormatInt(delta, 10))
 	params.Set("description", "Rounding adjustment")
-	params.Set("metadata["+MetaLineID+"]", roundingLineID)
-	params.Set("metadata["+MetaInvoiceID+"]", inv.ID)
-	params.Set("metadata["+MetaSource+"]", sourceTag)
+	setStripeMetadata(params, MetaLineID, roundingLineID)
+	setStripeMetadata(params, MetaInvoiceID, inv.ID)
+	setStripeMetadata(params, MetaSource, sourceTag)
 
 	key := fmt.Sprintf("settlement-rounding-%s-%d-%d", inv.ID, delta, inv.UpdatedAt.UnixNano())
 	if _, err := s.stripe.CreateInvoiceItem(ctx, params, tgt.requestOptions(key)); err != nil {

@@ -186,6 +186,22 @@ func (v *StandardVerifier) Verify(id, timestamp, signature string, body []byte) 
 		return ErrInvalidHeader
 	}
 
+	if err := v.checkTimestamp(timestamp); err != nil {
+		return err
+	}
+
+	signed := buildStandardSignedPayload(id, timestamp, body)
+	presented, err := parseStandardWebhookSignatures(signature)
+	if err != nil {
+		return err
+	}
+	if !v.matchesAnySecret(signed, presented) {
+		return ErrNoMatch
+	}
+	return nil
+}
+
+func (v *StandardVerifier) checkTimestamp(timestamp string) error {
 	secs, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
 		return ErrInvalidHeader
@@ -197,16 +213,20 @@ func (v *StandardVerifier) Verify(id, timestamp, signature string, body []byte) 
 	if drift > v.tolerance {
 		return fmt.Errorf("%w: drift %s", ErrTooOld, drift.Round(time.Second))
 	}
+	return nil
+}
 
+func buildStandardSignedPayload(id, timestamp string, body []byte) []byte {
 	signed := make([]byte, 0, len(id)+len(timestamp)+2+len(body))
 	signed = append(signed, id...)
 	signed = append(signed, '.')
 	signed = append(signed, timestamp...)
 	signed = append(signed, '.')
 	signed = append(signed, body...)
+	return signed
+}
 
-	// The header holds space-separated "<version>,<base64>" entries; only v1
-	// is defined today and unknown versions are ignored rather than trusted.
+func parseStandardWebhookSignatures(signature string) ([][]byte, error) {
 	var presented [][]byte
 	for _, field := range strings.Fields(signature) {
 		version, encoded, ok := strings.Cut(field, ",")
@@ -220,18 +240,21 @@ func (v *StandardVerifier) Verify(id, timestamp, signature string, body []byte) 
 		presented = append(presented, raw)
 	}
 	if len(presented) == 0 {
-		return ErrInvalidHeader
+		return nil, ErrInvalidHeader
 	}
+	return presented, nil
+}
 
+func (v *StandardVerifier) matchesAnySecret(signed []byte, presented [][]byte) bool {
 	for _, secret := range v.secrets {
 		want := hmacSHA256(secret, signed)
 		for _, got := range presented {
 			if hmac.Equal(got, want) {
-				return nil
+				return true
 			}
 		}
 	}
-	return ErrNoMatch
+	return false
 }
 
 func hmacSHA256(key, message []byte) []byte {

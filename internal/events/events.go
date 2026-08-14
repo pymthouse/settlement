@@ -78,6 +78,15 @@ type Descriptor struct {
 	Livemode bool
 }
 
+type stripeEventObject struct {
+	ID       string `json:"id"`
+	Customer any    `json:"customer"`
+}
+
+type stripeEventData struct {
+	Object stripeEventObject `json:"object"`
+}
+
 // stripeEvent is the subset of a Stripe event the doorman needs.
 type stripeEvent struct {
 	ID       string `json:"id"`
@@ -85,12 +94,7 @@ type stripeEvent struct {
 	Account  string `json:"account"`
 	Livemode bool   `json:"livemode"`
 	Object   string `json:"object"`
-	Data     struct {
-		Object struct {
-			ID       string `json:"id"`
-			Customer any    `json:"customer"`
-		} `json:"object"`
-	} `json:"data"`
+	Data     stripeEventData `json:"data"`
 }
 
 // DescribeStripe extracts routing metadata from a raw Stripe webhook body.
@@ -143,18 +147,22 @@ func customerID(v any) string {
 	return ""
 }
 
+type openMeterCustomer struct {
+	ID  string `json:"id"`
+	Key string `json:"key"`
+}
+
+type openMeterNotificationData struct {
+	ID       string            `json:"id"`
+	Customer openMeterCustomer `json:"customer"`
+}
+
 // openMeterNotification is the subset of an OpenMeter notification payload the
 // doorman needs. `data` is the fully expanded invoice.
 type openMeterNotification struct {
-	ID   string `json:"id"`
-	Type string `json:"type"`
-	Data struct {
-		ID       string `json:"id"`
-		Customer struct {
-			ID  string `json:"id"`
-			Key string `json:"key"`
-		} `json:"customer"`
-	} `json:"data"`
+	ID   string                    `json:"id"`
+	Type string                    `json:"type"`
+	Data openMeterNotificationData `json:"data"`
 }
 
 // DescribeOpenMeter extracts routing metadata from a raw OpenMeter

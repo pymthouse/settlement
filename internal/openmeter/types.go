@@ -256,26 +256,26 @@ func (i Invoice) BillableLines() []Line {
 // children, which is the set the draft-sync response must map.
 func (l Line) LineDiscountIDs() []string {
 	var out []string
-	var walk func(Line)
-	walk = func(line Line) {
-		if line.Discounts != nil {
-			for _, d := range line.Discounts.Amount {
-				if d.ID != "" {
-					out = append(out, d.ID)
-				}
-			}
-			for _, d := range line.Discounts.Usage {
-				if d.ID != "" {
-					out = append(out, d.ID)
-				}
+	collectLineDiscountIDs(l, &out)
+	return out
+}
+
+func collectLineDiscountIDs(line Line, out *[]string) {
+	if line.Discounts != nil {
+		for _, d := range line.Discounts.Amount {
+			if d.ID != "" {
+				*out = append(*out, d.ID)
 			}
 		}
-		for _, c := range line.Children {
-			walk(c)
+		for _, d := range line.Discounts.Usage {
+			if d.ID != "" {
+				*out = append(*out, d.ID)
+			}
 		}
 	}
-	walk(l)
-	return out
+	for _, child := range line.Children {
+		collectLineDiscountIDs(child, out)
+	}
 }
 
 // ChildIDs returns the ids of every descendant line.

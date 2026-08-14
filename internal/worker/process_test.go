@@ -404,6 +404,7 @@ func TestShutdownDuringRetryDoesNotDiscardTheMessage(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go func() {
 		time.Sleep(20 * time.Millisecond)
 		cancel()

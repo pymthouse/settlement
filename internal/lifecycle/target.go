@@ -12,6 +12,7 @@ package lifecycle
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -39,7 +40,20 @@ const (
 	// roundingLineID labels the adjustment item that absorbs the difference
 	// between per-line rounding and the invoice total.
 	roundingLineID = "rounding-adjustment"
+
+	// stripeMetadataParamPrefix is the Stripe form-encoding prefix for metadata keys.
+	stripeMetadataParamPrefix = "metadata["
 )
+
+// stripeMetadataParam builds a Stripe form field name for a metadata key.
+func stripeMetadataParam(key string) string {
+	return stripeMetadataParamPrefix + key + "]"
+}
+
+// setStripeMetadata writes one metadata entry onto Stripe form params.
+func setStripeMetadata(params url.Values, key, value string) {
+	params.Set(stripeMetadataParam(key), value)
+}
 
 // target is where an invoice's money should land.
 type target struct {

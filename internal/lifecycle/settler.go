@@ -128,27 +128,34 @@ func (s *Settler) DriveInvoice(ctx context.Context, inv *openmeter.Invoice) (str
 	return HandlerNoop, nil
 }
 
+// stripeWebhookObject is the Stripe object embedded in a webhook event body.
+type stripeWebhookObject struct {
+	ID            string            `json:"id"`
+	Object        string            `json:"object"`
+	Invoice       string            `json:"invoice"`
+	Metadata      map[string]string `json:"metadata"`
+	Status        string            `json:"status"`
+	PaymentIntent string            `json:"payment_intent"`
+}
+
+type stripeWebhookData struct {
+	Object stripeWebhookObject `json:"object"`
+}
+
+type stripeWebhookEvent struct {
+	ID      string            `json:"id"`
+	Type    string            `json:"type"`
+	Account string            `json:"account"`
+	Data    stripeWebhookData `json:"data"`
+}
+
 // HandleStripeEvent processes one raw Stripe webhook body.
 //
 // This is the half of the reconciliation OpenMeter cannot do for itself: it
 // never sees Stripe's webhooks, so an invoice sits in payment_processing
 // forever unless the worker tells it money arrived.
 func (s *Settler) HandleStripeEvent(ctx context.Context, raw []byte) (string, error) {
-	var event struct {
-		ID      string `json:"id"`
-		Type    string `json:"type"`
-		Account string `json:"account"`
-		Data    struct {
-			Object struct {
-				ID            string            `json:"id"`
-				Object        string            `json:"object"`
-				Invoice       string            `json:"invoice"`
-				Metadata      map[string]string `json:"metadata"`
-				Status        string            `json:"status"`
-				PaymentIntent string            `json:"payment_intent"`
-			} `json:"object"`
-		} `json:"data"`
-	}
+	var event stripeWebhookEvent
 	if err := json.Unmarshal(raw, &event); err != nil {
 		return HandlerNoop, faults.Wrap("unparseable_stripe_event", err)
 	}

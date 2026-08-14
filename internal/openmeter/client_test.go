@@ -21,11 +21,8 @@ func newTestClient(t *testing.T, handler http.Handler) *Client {
 	return New(config.OpenMeter{BaseURL: server.URL, APIKey: "om_test_key", Timeout: 5 * time.Second})
 }
 
-// The three completion calls are the only writes settlement makes; their paths
-// and bodies must match the Custom Invoicing contract exactly.
-func TestCompletionCallsHitTheDocumentedEndpoints(t *testing.T) {
+func TestDraftSynchronizedEndpoint(t *testing.T) {
 	var gotPath, gotAuth, gotBody string
-
 	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
@@ -34,89 +31,101 @@ func TestCompletionCallsHitTheDocumentedEndpoints(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	ctx := context.Background()
+	err := client.DraftSynchronized(context.Background(), "inv_1", DraftSynchronizedRequest{
+		Invoicing: &SyncResult{
+			ExternalID:              "in_stripe_1",
+			LineExternalIDs:         []LineExternalIDMapping{{LineID: "line_1", ExternalID: "ii_1"}},
+			LineDiscountExternalIDs: []LineDiscountIDMapping{{LineDiscountID: "disc_1", ExternalID: "ii_1"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "/api/v1/apps/custom-invoicing/inv_1/draft/synchronized"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if gotAuth != "Bearer om_test_key" {
+		t.Errorf("authorization = %q", gotAuth)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(gotBody), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	invoicing, ok := decoded["invoicing"].(map[string]any)
+	if !ok {
+		t.Fatalf("body has no invoicing block: %s", gotBody)
+	}
+	if invoicing["externalId"] != "in_stripe_1" {
+		t.Errorf("externalId = %v", invoicing["externalId"])
+	}
+	if _, ok := invoicing["lineExternalIds"]; !ok {
+		t.Error("lineExternalIds missing; the mapping cannot be supplied later")
+	}
+	if _, ok := invoicing["lineDiscountExternalIds"]; !ok {
+		t.Error("lineDiscountExternalIds missing")
+	}
+}
+
+func TestIssuingSynchronizedEndpoint(t *testing.T) {
+	var gotPath, gotBody string
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+
 	sentAt := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
-
-	t.Run("draft synchronized", func(t *testing.T) {
-		err := client.DraftSynchronized(ctx, "inv_1", DraftSynchronizedRequest{
-			Invoicing: &SyncResult{
-				ExternalID:              "in_stripe_1",
-				LineExternalIDs:         []LineExternalIDMapping{{LineID: "line_1", ExternalID: "ii_1"}},
-				LineDiscountExternalIDs: []LineDiscountIDMapping{{LineDiscountID: "disc_1", ExternalID: "ii_1"}},
-			},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if want := "/api/v1/apps/custom-invoicing/inv_1/draft/synchronized"; gotPath != want {
-			t.Errorf("path = %q, want %q", gotPath, want)
-		}
-		if gotAuth != "Bearer om_test_key" {
-			t.Errorf("authorization = %q", gotAuth)
-		}
-
-		var decoded map[string]any
-		if err := json.Unmarshal([]byte(gotBody), &decoded); err != nil {
-			t.Fatal(err)
-		}
-		invoicing, ok := decoded["invoicing"].(map[string]any)
-		if !ok {
-			t.Fatalf("body has no invoicing block: %s", gotBody)
-		}
-		if invoicing["externalId"] != "in_stripe_1" {
-			t.Errorf("externalId = %v", invoicing["externalId"])
-		}
-		if _, ok := invoicing["lineExternalIds"]; !ok {
-			t.Error("lineExternalIds missing; the mapping cannot be supplied later")
-		}
-		if _, ok := invoicing["lineDiscountExternalIds"]; !ok {
-			t.Error("lineDiscountExternalIds missing")
-		}
+	err := client.IssuingSynchronized(context.Background(), "inv_1", FinalizedRequest{
+		Invoicing: &FinalizedInvoicingRequest{InvoiceNumber: "STRIPE-1", SentToCustomerA: &sentAt},
+		Payment:   &FinalizedPaymentRequest{ExternalID: "pi_1"},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "/api/v1/apps/custom-invoicing/inv_1/issuing/synchronized"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
 
-	t.Run("issuing synchronized", func(t *testing.T) {
-		err := client.IssuingSynchronized(ctx, "inv_1", FinalizedRequest{
-			Invoicing: &FinalizedInvoicingRequest{InvoiceNumber: "STRIPE-1", SentToCustomerA: &sentAt},
-			Payment:   &FinalizedPaymentRequest{ExternalID: "pi_1"},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if want := "/api/v1/apps/custom-invoicing/inv_1/issuing/synchronized"; gotPath != want {
-			t.Errorf("path = %q, want %q", gotPath, want)
-		}
+	var decoded struct {
+		Invoicing struct {
+			InvoiceNumber   string `json:"invoiceNumber"`
+			SentToCustomerA string `json:"sentToCustomerAt"`
+		} `json:"invoicing"`
+		Payment struct {
+			ExternalID string `json:"externalId"`
+		} `json:"payment"`
+	}
+	if err := json.Unmarshal([]byte(gotBody), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Invoicing.InvoiceNumber != "STRIPE-1" {
+		t.Errorf("invoiceNumber = %q", decoded.Invoicing.InvoiceNumber)
+	}
+	if decoded.Payment.ExternalID != "pi_1" {
+		t.Errorf("payment externalId = %q — the payment reference is stamped here, not at payment time", decoded.Payment.ExternalID)
+	}
+}
 
-		var decoded struct {
-			Invoicing struct {
-				InvoiceNumber   string `json:"invoiceNumber"`
-				SentToCustomerA string `json:"sentToCustomerAt"`
-			} `json:"invoicing"`
-			Payment struct {
-				ExternalID string `json:"externalId"`
-			} `json:"payment"`
-		}
-		if err := json.Unmarshal([]byte(gotBody), &decoded); err != nil {
-			t.Fatal(err)
-		}
-		if decoded.Invoicing.InvoiceNumber != "STRIPE-1" {
-			t.Errorf("invoiceNumber = %q", decoded.Invoicing.InvoiceNumber)
-		}
-		if decoded.Payment.ExternalID != "pi_1" {
-			t.Errorf("payment externalId = %q — the payment reference is stamped here, not at payment time", decoded.Payment.ExternalID)
-		}
-	})
+func TestPaymentStatusEndpoint(t *testing.T) {
+	var gotPath, gotBody string
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
 
-	t.Run("payment status", func(t *testing.T) {
-		if err := client.UpdatePaymentStatus(ctx, "inv_1", TriggerPaid); err != nil {
-			t.Fatal(err)
-		}
-		if want := "/api/v1/apps/custom-invoicing/inv_1/payment/status"; gotPath != want {
-			t.Errorf("path = %q, want %q", gotPath, want)
-		}
-		if gotBody := gotBody; gotBody != `{"trigger":"paid"}`+"\n" && gotBody != `{"trigger":"paid"}` {
-			t.Errorf("body = %q, want a bare trigger", gotBody)
-		}
-	})
+	if err := client.UpdatePaymentStatus(context.Background(), "inv_1", TriggerPaid); err != nil {
+		t.Fatal(err)
+	}
+	if want := "/api/v1/apps/custom-invoicing/inv_1/payment/status"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if gotBody != `{"trigger":"paid"}`+"\n" && gotBody != `{"trigger":"paid"}` {
+		t.Errorf("body = %q, want a bare trigger", gotBody)
+	}
 }
 
 // Omitting the invoice number lets OpenMeter generate an INV- number; an empty

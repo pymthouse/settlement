@@ -38,7 +38,7 @@ func TestReplayBatchBypassesDeduplication(t *testing.T) {
 	}
 
 	// Two replays of the same batch must still deduplicate against each other.
-	if again := claimKeyOf(replayed, "stripe", "evt_1"); again != replay {
+	if claimKeyOf(replayed, "stripe", "evt_1") != replay {
 		t.Error("claim keys are not stable within a replay batch")
 	}
 }

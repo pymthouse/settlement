@@ -10,6 +10,7 @@ import (
 	"github.com/pymthouse/settlement/internal/config"
 	"github.com/pymthouse/settlement/internal/faults"
 	"github.com/pymthouse/settlement/internal/openmeter"
+	"github.com/pymthouse/settlement/internal/stripe"
 )
 
 // draftInvoice builds an OpenMeter invoice parked at the draft sync hook.
@@ -64,6 +65,57 @@ func notificationFor(t *testing.T, invoiceID, eventType string) []byte {
 	return body
 }
 
+func assertDraftSyncStripeInvoice(t *testing.T, sc *fakeStripe, invoice openmeter.Invoice) *stripe.Invoice {
+	t.Helper()
+	stripeInvoice := sc.onlyInvoice(t)
+	if stripeInvoice.Metadata[MetaInvoiceID] != invoice.ID {
+		t.Errorf("stripe invoice is not tagged with the OpenMeter invoice id: %v", stripeInvoice.Metadata)
+	}
+	if stripeInvoice.Status != "draft" {
+		t.Errorf("stripe invoice status = %q, want draft — OpenMeter still owns the lifecycle", stripeInvoice.Status)
+	}
+
+	items := sc.itemsFor(stripeInvoice.ID)
+	if len(items) != 2 {
+		t.Fatalf("expected 2 invoice items, got %d", len(items))
+	}
+	byLine := map[string]int64{}
+	for _, item := range items {
+		byLine[item.Metadata[MetaLineID]] = item.Amount
+	}
+	if byLine["line_1"] != 3000 || byLine["line_2"] != 1250 {
+		t.Errorf("item amounts = %v, want line_1=3000 line_2=1250 minor units", byLine)
+	}
+	return stripeInvoice
+}
+
+func assertDraftSyncOpenMeterMappings(t *testing.T, om *fakeOpenMeter, stripeInvoice *stripe.Invoice, invoiceID string) {
+	t.Helper()
+	body := om.draftFor(t, invoiceID)
+	if body.Invoicing == nil {
+		t.Fatal("draft synchronized body carried no invoicing block")
+	}
+	if body.Invoicing.ExternalID != stripeInvoice.ID {
+		t.Errorf("external id = %q, want the Stripe invoice %q", body.Invoicing.ExternalID, stripeInvoice.ID)
+	}
+
+	mapped := map[string]string{}
+	for _, m := range body.Invoicing.LineExternalIDs {
+		mapped[m.LineID] = m.ExternalID
+	}
+	for _, want := range []string{"line_1", "line_1_child", "line_2"} {
+		if mapped[want] == "" {
+			t.Errorf("line %s was not mapped to a Stripe id", want)
+		}
+	}
+	if mapped["line_1_child"] != mapped["line_1"] {
+		t.Error("a child line should map to the item that contains it")
+	}
+	if len(body.Invoicing.LineDiscountExternalIDs) != 1 || body.Invoicing.LineDiscountExternalIDs[0].LineDiscountID != "disc_1" {
+		t.Errorf("discount mapping = %+v, want disc_1", body.Invoicing.LineDiscountExternalIDs)
+	}
+}
+
 func TestDraftSyncBuildsStripeMirrorAndReportsIDs(t *testing.T) {
 	om, sc := newFakeOpenMeter(t), newFakeStripe(t)
 	invoice := draftInvoice()
@@ -81,52 +133,8 @@ func TestDraftSyncBuildsStripeMirrorAndReportsIDs(t *testing.T) {
 		t.Fatalf("handler = %q, want %q", handler, HandlerDraftSync)
 	}
 
-	stripeInvoice := sc.onlyInvoice(t)
-	if stripeInvoice.Metadata[MetaInvoiceID] != invoice.ID {
-		t.Errorf("stripe invoice is not tagged with the OpenMeter invoice id: %v", stripeInvoice.Metadata)
-	}
-	if stripeInvoice.Status != "draft" {
-		t.Errorf("stripe invoice status = %q, want draft — OpenMeter still owns the lifecycle", stripeInvoice.Status)
-	}
-
-	// Two OpenMeter lines become two Stripe items, priced at the line totals.
-	items := sc.itemsFor(stripeInvoice.ID)
-	if len(items) != 2 {
-		t.Fatalf("expected 2 invoice items, got %d", len(items))
-	}
-	byLine := map[string]int64{}
-	for _, item := range items {
-		byLine[item.Metadata[MetaLineID]] = item.Amount
-	}
-	if byLine["line_1"] != 3000 || byLine["line_2"] != 1250 {
-		t.Errorf("item amounts = %v, want line_1=3000 line_2=1250 minor units", byLine)
-	}
-
-	body := om.draftFor(t, invoice.ID)
-	if body.Invoicing == nil {
-		t.Fatal("draft synchronized body carried no invoicing block")
-	}
-	if body.Invoicing.ExternalID != stripeInvoice.ID {
-		t.Errorf("external id = %q, want the Stripe invoice %q", body.Invoicing.ExternalID, stripeInvoice.ID)
-	}
-
-	// Parent lines, their children, and the discount must all be mapped: this
-	// is the only call that accepts them.
-	mapped := map[string]string{}
-	for _, m := range body.Invoicing.LineExternalIDs {
-		mapped[m.LineID] = m.ExternalID
-	}
-	for _, want := range []string{"line_1", "line_1_child", "line_2"} {
-		if mapped[want] == "" {
-			t.Errorf("line %s was not mapped to a Stripe id", want)
-		}
-	}
-	if mapped["line_1_child"] != mapped["line_1"] {
-		t.Error("a child line should map to the item that contains it")
-	}
-	if len(body.Invoicing.LineDiscountExternalIDs) != 1 || body.Invoicing.LineDiscountExternalIDs[0].LineDiscountID != "disc_1" {
-		t.Errorf("discount mapping = %+v, want disc_1", body.Invoicing.LineDiscountExternalIDs)
-	}
+	stripeInvoice := assertDraftSyncStripeInvoice(t, sc, invoice)
+	assertDraftSyncOpenMeterMappings(t, om, stripeInvoice, invoice.ID)
 }
 
 // A redelivered draft event must not add a second copy of every line.

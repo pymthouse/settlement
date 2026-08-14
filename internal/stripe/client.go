@@ -25,6 +25,12 @@ import (
 	"github.com/pymthouse/settlement/internal/metrics"
 )
 
+const invoicesAPIPrefix = "/v1/invoices/"
+
+func invoiceAPIPath(id string, suffix string) string {
+	return invoicesAPIPrefix + url.PathEscape(id) + suffix
+}
+
 // Client calls the Stripe API.
 type Client struct {
 	cfg  config.Stripe
@@ -154,29 +160,11 @@ func (inv *Invoice) PrimaryPaymentIntent() (string, error) {
 		return "", fmt.Errorf("nil invoice")
 	}
 
-	if inv.Payments != nil && len(inv.Payments.Data) > 0 {
-		var first string
-		for _, p := range inv.Payments.Data {
-			id := paymentIntentID(p.Payment.PaymentIntent)
-			if id == "" {
-				continue
-			}
-			if first == "" {
-				first = id
-			}
-			if p.IsDefault {
-				return id, nil
-			}
+	if id, err := paymentIntentFromPayments(inv); err != nil || id != "" {
+		if err != nil {
+			return "", err
 		}
-		if first != "" {
-			if len(inv.Payments.Data) > 1 {
-				// Multiple payments but none marked default: use the first
-				// resolvable payment_intent and let the caller decide.
-				return first, nil
-			}
-			return first, nil
-		}
-		return "", fmt.Errorf("invoice %s has %d payment(s) but no payment_intent reference", inv.ID, len(inv.Payments.Data))
+		return id, nil
 	}
 
 	if inv.ConfirmationSecret != nil {
@@ -186,6 +174,30 @@ func (inv *Invoice) PrimaryPaymentIntent() (string, error) {
 	}
 
 	return "", fmt.Errorf("invoice %s has no payment reference", inv.ID)
+}
+
+func paymentIntentFromPayments(inv *Invoice) (string, error) {
+	if inv.Payments == nil || len(inv.Payments.Data) == 0 {
+		return "", nil
+	}
+
+	var first string
+	for _, p := range inv.Payments.Data {
+		id := paymentIntentID(p.Payment.PaymentIntent)
+		if id == "" {
+			continue
+		}
+		if first == "" {
+			first = id
+		}
+		if p.IsDefault {
+			return id, nil
+		}
+	}
+	if first != "" {
+		return first, nil
+	}
+	return "", fmt.Errorf("invoice %s has %d payment(s) but no payment_intent reference", inv.ID, len(inv.Payments.Data))
 }
 
 func paymentIntentID(raw json.RawMessage) string {
@@ -299,7 +311,7 @@ func (c *Client) CreateInvoice(ctx context.Context, params url.Values, opts Requ
 // resolve a payment intent under the post-basil Invoice shape.
 func (c *Client) GetInvoice(ctx context.Context, id string, opts RequestOptions) (*Invoice, error) {
 	var out Invoice
-	path := "/v1/invoices/" + url.PathEscape(id) + "?expand[]=payments"
+	path := invoiceAPIPath(id, "?expand[]=payments")
 	if err := c.do(ctx, "get_invoice", http.MethodGet, path, nil, opts, &out); err != nil {
 		return nil, err
 	}
@@ -309,7 +321,7 @@ func (c *Client) GetInvoice(ctx context.Context, id string, opts RequestOptions)
 // UpdateInvoice updates a draft invoice.
 func (c *Client) UpdateInvoice(ctx context.Context, id string, params url.Values, opts RequestOptions) (*Invoice, error) {
 	var out Invoice
-	path := "/v1/invoices/" + url.PathEscape(id)
+	path := invoiceAPIPath(id, "")
 	if err := c.do(ctx, "update_invoice", http.MethodPost, path, params, opts, &out); err != nil {
 		return nil, err
 	}
@@ -327,7 +339,7 @@ func (c *Client) FinalizeInvoice(ctx context.Context, id string, autoAdvance boo
 
 	var out Invoice
 	// Stripe API is POST /v1/invoices/{id}/finalize (not finalize_invoice).
-	path := "/v1/invoices/" + url.PathEscape(id) + "/finalize"
+	path := invoiceAPIPath(id, "/finalize")
 	if err := c.do(ctx, "finalize_invoice", http.MethodPost, path, params, opts, &out); err != nil {
 		return nil, err
 	}
@@ -368,7 +380,7 @@ func (c *Client) ConfirmPaymentIntent(ctx context.Context, id string, opts Reque
 // VoidInvoice voids a finalized invoice.
 func (c *Client) VoidInvoice(ctx context.Context, id string, opts RequestOptions) (*Invoice, error) {
 	var out Invoice
-	path := "/v1/invoices/" + url.PathEscape(id) + "/void"
+	path := invoiceAPIPath(id, "/void")
 	if err := c.do(ctx, "void_invoice", http.MethodPost, path, nil, opts, &out); err != nil {
 		return nil, err
 	}
