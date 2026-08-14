@@ -8,11 +8,13 @@
 # `redpanda` hits the C++ binary which rejects --kafka-addr).
 FROM redpandadata/redpanda:v24.2.4
 
-# Railway build context is the repo root (dockerfilePath=deploy/kafka/Dockerfile).
+# Railway builds this file with repo-root context (dockerfilePath
+# deploy/kafka/Dockerfile, no rootDirectory). COPY paths are repo-root relative.
+# The base image USER is 101, so switch to root before COPY/chmod.
+USER root
+
 COPY deploy/kafka/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
-
-USER root
 
 # Settlement only uses the Kafka API (:9092). The Admin API (:9644) is unused
 # by producer/worker/settlementctl, so disable it rather than leave an
