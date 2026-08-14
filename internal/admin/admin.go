@@ -195,11 +195,25 @@ func (s *server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 		Secure:   true,
 	})
-	next := r.FormValue("next")
-	if next == "" || !strings.HasPrefix(next, adminRoot) {
-		next = adminHome
+	http.Redirect(w, r, localRedirectTarget(r.FormValue("next")), http.StatusSeeOther)
+}
+
+// localRedirectTarget validates a post-login redirect target against the
+// admin console's own path space. It rejects anything that could carry the
+// browser off-site: absolute URLs, scheme-relative URLs ("//evil.com"), and
+// backslash tricks some browsers normalize into "//" before navigating.
+// Parsing the value and checking Hostname()/Scheme are empty is CodeQL's
+// recommended sanitizer for go/unvalidated-url-redirection; a bare
+// strings.HasPrefix guard isn't recognized as one.
+func localRedirectTarget(next string) string {
+	if next == "" || strings.ContainsRune(next, '\\') {
+		return adminHome
 	}
-	http.Redirect(w, r, next, http.StatusSeeOther)
+	u, err := url.Parse(next)
+	if err != nil || u.Hostname() != "" || u.Scheme != "" || !strings.HasPrefix(u.Path, adminRoot) {
+		return adminHome
+	}
+	return next
 }
 
 func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -379,6 +393,9 @@ func (s *server) handleDLQGet(w http.ResponseWriter, r *http.Request) {
 	count, _ := strconv.Atoi(r.URL.Query().Get("count"))
 	if count <= 0 {
 		count = 25
+	}
+	if count > ops.MaxInspectCount {
+		count = ops.MaxInspectCount
 	}
 	offset := ops.FirstOffset
 	if v := r.URL.Query().Get("offset"); v != "" {
