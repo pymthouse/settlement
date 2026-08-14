@@ -115,6 +115,17 @@ func TestLoginRedirectAllowsOnSiteNext(t *testing.T) {
 	}
 }
 
+func TestLoginRedirectPreservesQueryOnAllowedPath(t *testing.T) {
+	h := Handler(Deps{Admin: config.Admin{Token: "secret"}})
+	req := httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader("token=secret&next=/admin/invoice%3Fid%3Dinv_lookup"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if loc := rec.Header().Get("Location"); loc != "/admin/invoice?id=inv_lookup" {
+		t.Fatalf("Location = %q, want /admin/invoice?id=inv_lookup", loc)
+	}
+}
+
 func TestRedriveRequiresConfirm(t *testing.T) {
 	h := Handler(Deps{
 		Admin: config.Admin{Token: "secret"},

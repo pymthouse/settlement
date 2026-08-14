@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +33,19 @@ const (
 	adminHome    = "/admin/"
 	adminLogin   = "/admin/login"
 )
+
+// Post-login redirects are limited to these admin console GET pages.
+// slices.Contains against this list is Sonar/CodeQL's recommended allow-list
+// sanitizer for open-redirect rules; dynamic path-prefix checks are not
+// recognized.
+var allowedLoginRedirects = []string{
+	adminHome,
+	"/admin",
+	"/admin/invoice",
+	"/admin/dlq",
+	"/admin/replay",
+	"/admin/links",
+}
 
 //go:embed all:ui
 var uiFS embed.FS
@@ -195,25 +209,19 @@ func (s *server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 		Secure:   true,
 	})
-	http.Redirect(w, r, localRedirectTarget(r.FormValue("next")), http.StatusSeeOther)
-}
-
-// localRedirectTarget validates a post-login redirect target against the
-// admin console's own path space. It rejects anything that could carry the
-// browser off-site: absolute URLs, scheme-relative URLs ("//evil.com"), and
-// backslash tricks some browsers normalize into "//" before navigating.
-// Parsing the value and checking Hostname()/Scheme are empty is CodeQL's
-// recommended sanitizer for go/unvalidated-url-redirection; a bare
-// strings.HasPrefix guard isn't recognized as one.
-func localRedirectTarget(next string) string {
-	if next == "" || strings.ContainsRune(next, '\\') {
-		return adminHome
+	redirect := adminHome
+	next := r.FormValue("next")
+	if next != "" && !strings.ContainsRune(next, '\\') {
+		if u, err := url.Parse(next); err == nil && u.Hostname() == "" && u.Scheme == "" {
+			if slices.Contains(allowedLoginRedirects, u.Path) {
+				redirect = u.Path
+				if u.RawQuery != "" {
+					redirect += "?" + u.RawQuery
+				}
+			}
+		}
 	}
-	u, err := url.Parse(next)
-	if err != nil || u.Hostname() != "" || u.Scheme != "" || !strings.HasPrefix(u.Path, adminRoot) {
-		return adminHome
-	}
-	return next
+	http.Redirect(w, r, redirect, http.StatusSeeOther)
 }
 
 func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
