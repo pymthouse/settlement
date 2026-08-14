@@ -8,7 +8,8 @@
 # `redpanda` hits the C++ binary which rejects --kafka-addr).
 FROM redpandadata/redpanda:v24.2.4
 
-COPY entrypoint.sh /entrypoint.sh
+# Railway build context is the repo root (dockerfilePath=deploy/kafka/Dockerfile).
+COPY deploy/kafka/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 USER root
