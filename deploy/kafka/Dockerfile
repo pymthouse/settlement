@@ -14,6 +14,6 @@ USER root
 COPY start.sh /usr/local/bin/settlement-kafka-start.sh
 RUN chmod +x /usr/local/bin/settlement-kafka-start.sh
 
-# Admin API is disabled and bound to 127.0.0.1 by default. Override bind with
+# Admin API binds to 127.0.0.1 by default (see start.sh). Override with
 # REDPANDA_ADMIN_ADDR=0.0.0.0 when remote Admin API access is required.
 CMD ["/usr/local/bin/settlement-kafka-start.sh"]
