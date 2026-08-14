@@ -7,16 +7,21 @@
 # startCommand that invokes `rpk redpanda start ...` (Railway image deploys
 # replace ENTRYPOINT; bare `redpanda` hits the C++ binary which rejects
 # --kafka-addr).
-#
-# Railway builds this file with repo-root context (dockerfilePath
-# deploy/kafka/Dockerfile, no rootDirectory). COPY paths are repo-root relative.
 FROM redpandadata/redpanda:v24.2.4
 
 USER root
 
-COPY deploy/kafka/start.sh /usr/local/bin/settlement-kafka-start.sh
-RUN chmod +x /usr/local/bin/settlement-kafka-start.sh
-
-# Admin API binds to 127.0.0.1 by default (see start.sh). Override with
-# REDPANDA_ADMIN_ADDR=0.0.0.0 when remote Admin API access is required.
-CMD ["/usr/local/bin/settlement-kafka-start.sh"]
+# Settlement only uses the Kafka API (:9092). The Admin API (:9644) is unused
+# by producer/worker/settlementctl, so disable it rather than leave an
+# unauthenticated listener on 0.0.0.0.
+CMD ["rpk", "redpanda", "start", \
+  "--kafka-addr", "internal://0.0.0.0:9092", \
+  "--advertise-kafka-addr", "internal://settlement-kafka.railway.internal:9092", \
+  "--smp", "1", \
+  "--memory", "1G", \
+  "--reserve-memory", "0M", \
+  "--overprovisioned", \
+  "--check=false", \
+  "--default-log-level", "warn", \
+  "--set", "redpanda.auto_create_topics_enabled=false", \
+  "--set", "redpanda.enable_admin_api=false"]
