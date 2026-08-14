@@ -33,10 +33,13 @@ services:
       - --kafka-addr=PLAINTEXT://0.0.0.0:9092
       - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
       - --check=false
+      # Settlement never calls the Admin API; keep the Kafka listener only.
+      - --set=redpanda.enable_admin_api=false
     ports:
       - "127.0.0.1:19092:9092"
     healthcheck:
-      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      # Kafka API only — rpk cluster health needs Admin API (:9644).
+      test: ["CMD-SHELL", "rpk cluster metadata -X brokers=127.0.0.1:9092 >/dev/null 2>&1"]
       interval: 5s
       timeout: 5s
       retries: 30
