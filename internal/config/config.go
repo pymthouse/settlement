@@ -133,12 +133,12 @@ type OpenMeter struct {
 
 // Stripe is the worker's Stripe API configuration.
 type Stripe struct {
-	APIBase            string
-	SecretKey          string
+	APIBase   string
+	SecretKey string
 	// SandboxSecretKey is the sandbox/test platform key used when OpenMeter
 	// customer/invoice metadata sets stripe_livemode=false. Empty means
 	// livemode=false invoices cannot be charged (permanent fault).
-	SandboxSecretKey string
+	SandboxSecretKey   string
 	APIVersion         string
 	Timeout            time.Duration
 	MaxRetries         int
@@ -232,16 +232,16 @@ type Admin struct {
 func LoadProducer() (Producer, error) {
 	var errs []error
 	p := Producer{
-		Addr:                    env("SETTLEMENT_HTTP_ADDR", ":8080"),
-		ShutdownTimeout:         envDuration("SETTLEMENT_SHUTDOWN_TIMEOUT", 15*time.Second, &errs),
-		MaxBodyBytes:            int64(envInt("SETTLEMENT_MAX_BODY_BYTES", 1<<20, &errs)),
+		Addr:                        env("SETTLEMENT_HTTP_ADDR", ":8080"),
+		ShutdownTimeout:             envDuration("SETTLEMENT_SHUTDOWN_TIMEOUT", 15*time.Second, &errs),
+		MaxBodyBytes:                int64(envInt("SETTLEMENT_MAX_BODY_BYTES", 1<<20, &errs)),
 		StripeWebhookSecrets:        envList("SETTLEMENT_STRIPE_WEBHOOK_SECRETS"),
 		StripeSandboxWebhookSecrets: envList("SETTLEMENT_STRIPE_SANDBOX_WEBHOOK_SECRETS"),
 		StripeToleranceSeconds:      int64(envInt("SETTLEMENT_STRIPE_TOLERANCE_SECONDS", 300, &errs)),
-		OpenMeterWebhookSecrets: envList("SETTLEMENT_OPENMETER_WEBHOOK_SECRETS"),
-		OpenMeterToleranceSecs:  int64(envInt("SETTLEMENT_OPENMETER_TOLERANCE_SECONDS", 300, &errs)),
-		CollectRequestSecrets:   envList("SETTLEMENT_COLLECT_REQUEST_SECRETS"),
-		Kafka:                   loadKafka(&errs),
+		OpenMeterWebhookSecrets:     envList("SETTLEMENT_OPENMETER_WEBHOOK_SECRETS"),
+		OpenMeterToleranceSecs:      int64(envInt("SETTLEMENT_OPENMETER_TOLERANCE_SECONDS", 300, &errs)),
+		CollectRequestSecrets:       envList("SETTLEMENT_COLLECT_REQUEST_SECRETS"),
+		Kafka:                       loadKafka(&errs),
 	}
 
 	if len(p.StripeWebhookSecrets) == 0 && len(p.OpenMeterWebhookSecrets) == 0 {
