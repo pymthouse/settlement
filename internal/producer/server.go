@@ -39,6 +39,7 @@ type Server struct {
 	log           *slog.Logger
 	publisher     Publisher
 	stripe        *webhook.StripeVerifier
+	stripeSandbox *webhook.StripeVerifier
 	standard      *webhook.StandardVerifier
 	collectShared *webhook.SharedSecretVerifier
 	now           func() time.Time
@@ -51,6 +52,7 @@ func New(cfg config.Producer, log *slog.Logger, publisher Publisher) *Server {
 		log:           log,
 		publisher:     publisher,
 		stripe:        webhook.NewStripeVerifier(cfg.StripeWebhookSecrets, cfg.StripeToleranceSeconds),
+		stripeSandbox: webhook.NewStripeVerifier(cfg.StripeSandboxWebhookSecrets, cfg.StripeToleranceSeconds),
 		standard:      webhook.NewStandardVerifier(cfg.OpenMeterWebhookSecrets, cfg.OpenMeterToleranceSecs),
 		collectShared: webhook.NewSharedSecretVerifier(cfg.CollectRequestSecrets),
 		now:           time.Now,
@@ -62,6 +64,7 @@ func New(cfg config.Producer, log *slog.Logger, publisher Publisher) *Server {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /webhooks/stripe", s.handleStripe)
+	mux.HandleFunc("POST /webhooks/stripe/sandbox", s.handleStripeSandbox)
 	mux.HandleFunc("POST /webhooks/openmeter", s.handleOpenMeter)
 	mux.HandleFunc("POST /requests/collect", s.handleCollectRequest)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -73,7 +76,7 @@ func (s *Server) Routes() http.Handler {
 		// deliberately not probed here: a reachability check on every probe
 		// would add the very latency the doorman exists to avoid, and a
 		// publish failure already surfaces as a 5xx that Stripe will retry.
-		if !s.stripe.Enabled() && !s.standard.Enabled() {
+		if !s.stripe.Enabled() && !s.standard.Enabled() && !s.stripeSandbox.Enabled() {
 			http.Error(w, "no webhook secrets configured", http.StatusServiceUnavailable)
 			return
 		}
@@ -85,14 +88,22 @@ func (s *Server) Routes() http.Handler {
 }
 
 func (s *Server) handleStripe(w http.ResponseWriter, r *http.Request) {
+	s.handleStripeWith(w, r, s.stripe, "stripe")
+}
+
+func (s *Server) handleStripeSandbox(w http.ResponseWriter, r *http.Request) {
+	s.handleStripeWith(w, r, s.stripeSandbox, "stripe_sandbox")
+}
+
+func (s *Server) handleStripeWith(w http.ResponseWriter, r *http.Request, verifier *webhook.StripeVerifier, sourceLabel string) {
 	start := s.now()
 	defer func() {
 		metrics.WebhookDuration.WithLabelValues(events.SourceStripe).Observe(time.Since(start).Seconds())
 	}()
 
-	if !s.stripe.Enabled() {
+	if !verifier.Enabled() {
 		s.reject(w, events.SourceStripe, "not_configured", http.StatusServiceUnavailable,
-			"stripe webhooks are not configured", nil)
+			sourceLabel+" webhooks are not configured", nil)
 		return
 	}
 
@@ -101,7 +112,7 @@ func (s *Server) handleStripe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.stripe.Verify(r.Header.Get("Stripe-Signature"), body); err != nil {
+	if err := verifier.Verify(r.Header.Get("Stripe-Signature"), body); err != nil {
 		s.reject(w, events.SourceStripe, "bad_signature", http.StatusBadRequest, "invalid signature", err)
 		return
 	}

@@ -278,3 +278,29 @@ func asError(err error, target **Error) bool {
 	}
 	return ok
 }
+
+func TestSecretForSelectsSandboxKey(t *testing.T) {
+	live := true
+	sandbox := false
+	c := New(config.Stripe{
+		SecretKey:        "sk_live_x",
+		SandboxSecretKey: "sk_test_x",
+		Timeout:          time.Second,
+	})
+	got, err := c.SecretFor(RequestOptions{Livemode: &live})
+	if err != nil || got != "sk_live_x" {
+		t.Fatalf("live: got %q err %v", got, err)
+	}
+	got, err = c.SecretFor(RequestOptions{Livemode: &sandbox})
+	if err != nil || got != "sk_test_x" {
+		t.Fatalf("sandbox: got %q err %v", got, err)
+	}
+	got, err = c.SecretFor(RequestOptions{})
+	if err != nil || got != "sk_live_x" {
+		t.Fatalf("default: got %q err %v", got, err)
+	}
+	c2 := New(config.Stripe{SecretKey: "sk_live_x", Timeout: time.Second})
+	if _, err := c2.SecretFor(RequestOptions{Livemode: &sandbox}); err == nil {
+		t.Fatal("expected error when sandbox key missing")
+	}
+}
