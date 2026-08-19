@@ -88,14 +88,14 @@ func (s *Server) Routes() http.Handler {
 }
 
 func (s *Server) handleStripe(w http.ResponseWriter, r *http.Request) {
-	s.handleStripeWith(w, r, s.stripe, "stripe")
+	s.handleStripeWith(w, r, s.stripe, "stripe", true)
 }
 
 func (s *Server) handleStripeSandbox(w http.ResponseWriter, r *http.Request) {
-	s.handleStripeWith(w, r, s.stripeSandbox, "stripe_sandbox")
+	s.handleStripeWith(w, r, s.stripeSandbox, "stripe_sandbox", false)
 }
 
-func (s *Server) handleStripeWith(w http.ResponseWriter, r *http.Request, verifier *webhook.StripeVerifier, sourceLabel string) {
+func (s *Server) handleStripeWith(w http.ResponseWriter, r *http.Request, verifier *webhook.StripeVerifier, sourceLabel string, expectLivemode bool) {
 	start := s.now()
 	defer func() {
 		metrics.WebhookDuration.WithLabelValues(events.SourceStripe).Observe(time.Since(start).Seconds())
@@ -114,6 +114,17 @@ func (s *Server) handleStripeWith(w http.ResponseWriter, r *http.Request, verifi
 
 	if err := verifier.Verify(r.Header.Get("Stripe-Signature"), body); err != nil {
 		s.reject(w, events.SourceStripe, "bad_signature", http.StatusBadRequest, "invalid signature", err)
+		return
+	}
+
+	desc, err := events.DescribeStripe(body)
+	if err != nil {
+		s.reject(w, events.SourceStripe, "bad_request", http.StatusBadRequest, "unrecognised event body", err)
+		return
+	}
+	if desc.Livemode != expectLivemode {
+		s.reject(w, events.SourceStripe, "livemode_mismatch", http.StatusBadRequest,
+			"event livemode does not match endpoint", nil)
 		return
 	}
 

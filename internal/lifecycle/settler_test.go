@@ -498,9 +498,11 @@ func TestStripeEventsMapToPaymentTriggers(t *testing.T) {
 	for eventType, wantTrigger := range cases {
 		t.Run(eventType, func(t *testing.T) {
 			om, sc := newFakeOpenMeter(t), newFakeStripe(t)
+			om.putInvoice(draftInvoice())
 			settler := newTestSettler(t, om, sc, nil)
 
 			body := []byte(`{"id":"evt_1","type":"` + eventType + `","account":"acct_dev_1",
+				"livemode":true,
 				"data":{"object":{"id":"in_stripe_1","object":"invoice",
 				"metadata":{"` + MetaInvoiceID + `":"inv_om_1"}}}}`)
 
@@ -562,10 +564,11 @@ func TestStripeEventWithoutOurMetadataIsIgnored(t *testing.T) {
 // retry forever and eventually dead-letter a perfectly settled invoice.
 func TestConflictOnCompletionIsTreatedAsSuccess(t *testing.T) {
 	om, sc := newFakeOpenMeter(t), newFakeStripe(t)
+	om.putInvoice(draftInvoice())
 	settler := newTestSettler(t, om, sc, nil)
 	om.conflictOn["payment"] = true
 
-	body := []byte(`{"id":"evt_1","type":"invoice.payment_succeeded","data":{"object":{"id":"in_1",
+	body := []byte(`{"id":"evt_1","type":"invoice.payment_succeeded","livemode":true,"data":{"object":{"id":"in_1",
 		"metadata":{"` + MetaInvoiceID + `":"inv_om_1"}}}}`)
 
 	if _, err := settler.HandleStripeEvent(context.Background(), body); err != nil {
@@ -577,10 +580,11 @@ func TestConflictOnCompletionIsTreatedAsSuccess(t *testing.T) {
 // must also ack so webhook redeliveries do not fill the DLQ.
 func TestAlreadyPaidTriggerIsTreatedAsSuccess(t *testing.T) {
 	om, sc := newFakeOpenMeter(t), newFakeStripe(t)
+	om.putInvoice(draftInvoice())
 	settler := newTestSettler(t, om, sc, nil)
 	om.alreadyPaidOn = true
 
-	body := []byte(`{"id":"evt_1","type":"invoice.paid","data":{"object":{"id":"in_1",
+	body := []byte(`{"id":"evt_1","type":"invoice.paid","livemode":true,"data":{"object":{"id":"in_1",
 		"metadata":{"` + MetaInvoiceID + `":"inv_om_1"}}}}`)
 
 	if _, err := settler.HandleStripeEvent(context.Background(), body); err != nil {
@@ -648,6 +652,68 @@ func TestUnparseableBodiesArePermanentFailures(t *testing.T) {
 	}
 	if _, err := settler.HandleStripeEvent(context.Background(), []byte(`{`)); !faults.IsPermanent(err) {
 		t.Errorf("malformed stripe event should be permanent, got %v", err)
+	}
+}
+
+// A sandbox-signed invoice.paid must not trigger_paid a live OpenMeter invoice.
+func TestSandboxStripeEventDoesNotAdvanceLiveInvoice(t *testing.T) {
+	om, sc := newFakeOpenMeter(t), newFakeStripe(t)
+	om.putInvoice(draftInvoice())
+	settler := newTestSettler(t, om, sc, nil)
+
+	body := []byte(`{"id":"evt_sandbox","type":"invoice.paid","livemode":false,
+		"data":{"object":{"id":"in_test","metadata":{"` + MetaInvoiceID + `":"inv_om_1"}}}}`)
+
+	_, err := settler.HandleStripeEvent(context.Background(), body)
+	if !faults.IsPermanent(err) {
+		t.Fatalf("livemode mismatch should be permanent, got %v", err)
+	}
+	if faults.Reason(err) != "livemode_mismatch" {
+		t.Errorf("reason = %q, want livemode_mismatch", faults.Reason(err))
+	}
+	if got := om.triggersFor("inv_om_1"); len(got) != 0 {
+		t.Errorf("sandbox event advanced a live invoice: %v", got)
+	}
+}
+
+func TestLiveStripeEventDoesNotAdvanceSandboxInvoice(t *testing.T) {
+	om, sc := newFakeOpenMeter(t), newFakeStripe(t)
+	invoice := draftInvoice()
+	invoice.Metadata = openmeter.Metadata{"stripe_livemode": "false"}
+	om.putInvoice(invoice)
+	settler := newTestSettler(t, om, sc, nil)
+
+	body := []byte(`{"id":"evt_live","type":"invoice.paid","livemode":true,
+		"data":{"object":{"id":"in_live","metadata":{"` + MetaInvoiceID + `":"inv_om_1"}}}}`)
+
+	_, err := settler.HandleStripeEvent(context.Background(), body)
+	if !faults.IsPermanent(err) {
+		t.Fatalf("livemode mismatch should be permanent, got %v", err)
+	}
+	if got := om.triggersFor("inv_om_1"); len(got) != 0 {
+		t.Errorf("live event advanced a sandbox invoice: %v", got)
+	}
+}
+
+func TestSandboxStripeEventAdvancesSandboxInvoice(t *testing.T) {
+	om, sc := newFakeOpenMeter(t), newFakeStripe(t)
+	invoice := draftInvoice()
+	invoice.Metadata = openmeter.Metadata{"stripe_livemode": "false"}
+	om.putInvoice(invoice)
+	settler := newTestSettler(t, om, sc, nil)
+
+	body := []byte(`{"id":"evt_sandbox","type":"invoice.paid","livemode":false,
+		"data":{"object":{"id":"in_test","metadata":{"` + MetaInvoiceID + `":"inv_om_1"}}}}`)
+
+	handler, err := settler.HandleStripeEvent(context.Background(), body)
+	if err != nil {
+		t.Fatalf("HandleStripeEvent: %v", err)
+	}
+	if handler != HandlerPaymentStatus {
+		t.Fatalf("handler = %q, want %q", handler, HandlerPaymentStatus)
+	}
+	if got := om.triggersFor("inv_om_1"); len(got) != 1 || got[0] != openmeter.TriggerPaid {
+		t.Errorf("triggers = %v, want [%s]", got, openmeter.TriggerPaid)
 	}
 }
 

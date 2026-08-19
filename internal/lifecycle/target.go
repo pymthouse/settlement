@@ -111,16 +111,7 @@ func (s *Settler) resolveTarget(ctx context.Context, inv *openmeter.Invoice) (ta
 	if v := inv.Metadata.Get(s.cfg.ChargeModelMetadataKey); v != "" {
 		model = config.ChargeModel(strings.ToLower(v))
 	}
-	livemodeKey := s.cfg.LivemodeMetadataKey
-	if livemodeKey == "" {
-		livemodeKey = "stripe_livemode"
-	}
-	if v := metadata.Get(livemodeKey); v != "" {
-		livemode = strings.EqualFold(v, "true") || v == "1"
-	}
-	if v := inv.Metadata.Get(livemodeKey); v != "" {
-		livemode = strings.EqualFold(v, "true") || v == "1"
-	}
+	livemode = parseLivemodeMetadata(metadata, inv.Metadata, s.cfg.LivemodeMetadataKey)
 
 	if !config.ValidChargeModel(model) {
 		return target{}, faults.Permanentf("invalid_charge_model",
@@ -145,6 +136,30 @@ func (s *Settler) resolveTarget(ctx context.Context, inv *openmeter.Invoice) (ta
 	}
 
 	return target{Model: model, Account: account, Livemode: livemode}, nil
+}
+
+// invoiceLivemode is the OpenMeter invoice's intended Stripe mode. Customer
+// metadata is the default; invoice metadata wins, matching resolveTarget.
+func (s *Settler) invoiceLivemode(ctx context.Context, inv *openmeter.Invoice) (bool, error) {
+	metadata, err := s.customerMetadata(ctx, inv)
+	if err != nil {
+		return true, err
+	}
+	return parseLivemodeMetadata(metadata, inv.Metadata, s.cfg.LivemodeMetadataKey), nil
+}
+
+func parseLivemodeMetadata(customer, invoice openmeter.Metadata, key string) bool {
+	livemode := true
+	if key == "" {
+		key = "stripe_livemode"
+	}
+	if v := customer.Get(key); v != "" {
+		livemode = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := invoice.Get(key); v != "" {
+		livemode = strings.EqualFold(v, "true") || v == "1"
+	}
+	return livemode
 }
 
 // customerMetadata reads the OpenMeter customer's metadata, cached briefly.

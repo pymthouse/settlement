@@ -143,10 +143,11 @@ type stripeWebhookData struct {
 }
 
 type stripeWebhookEvent struct {
-	ID      string            `json:"id"`
-	Type    string            `json:"type"`
-	Account string            `json:"account"`
-	Data    stripeWebhookData `json:"data"`
+	ID       string            `json:"id"`
+	Type     string            `json:"type"`
+	Account  string            `json:"account"`
+	Livemode bool              `json:"livemode"`
+	Data     stripeWebhookData `json:"data"`
 }
 
 // HandleStripeEvent processes one raw Stripe webhook body.
@@ -173,6 +174,23 @@ func (s *Settler) HandleStripeEvent(ctx context.Context, raw []byte) (string, er
 		s.log.Debug("stripe event carries no openmeter invoice id",
 			"event_id", event.ID, "type", event.Type, "object", event.Data.Object.ID)
 		return HandlerNoop, nil
+	}
+
+	inv, err := s.om.GetInvoice(ctx, invoiceID)
+	if err != nil {
+		if openmeter.IsNotFound(err) {
+			return HandlerNoop, faults.Wrap("invoice_deleted", err)
+		}
+		return HandlerPaymentStatus, fmt.Errorf("reload invoice %s: %w", invoiceID, err)
+	}
+	wantLivemode, err := s.invoiceLivemode(ctx, inv)
+	if err != nil {
+		return HandlerPaymentStatus, fmt.Errorf("resolve invoice %s livemode: %w", invoiceID, err)
+	}
+	if event.Livemode != wantLivemode {
+		return HandlerNoop, faults.Permanentf("livemode_mismatch",
+			"stripe event %s livemode=%t does not match invoice %s stripe_livemode=%t",
+			event.ID, event.Livemode, invoiceID, wantLivemode)
 	}
 
 	s.log.Info("advancing payment status",
