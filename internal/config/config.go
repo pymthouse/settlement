@@ -94,6 +94,9 @@ type Producer struct {
 	// StripeWebhookSecrets are whsec_ values. Multiple entries let a secret be
 	// rotated without dropping in-flight deliveries.
 	StripeWebhookSecrets []string
+	// StripeSandboxWebhookSecrets verify POST /webhooks/stripe/sandbox.
+	// Optional — when empty the sandbox route is disabled.
+	StripeSandboxWebhookSecrets []string
 	// StripeToleranceSeconds bounds webhook timestamp skew (replay defence).
 	StripeToleranceSeconds int64
 
@@ -130,8 +133,12 @@ type OpenMeter struct {
 
 // Stripe is the worker's Stripe API configuration.
 type Stripe struct {
-	APIBase            string
-	SecretKey          string
+	APIBase   string
+	SecretKey string
+	// SandboxSecretKey is the sandbox/test platform key used when OpenMeter
+	// customer/invoice metadata sets stripe_livemode=false. Empty means
+	// livemode=false invoices cannot be charged (permanent fault).
+	SandboxSecretKey   string
 	APIVersion         string
 	Timeout            time.Duration
 	MaxRetries         int
@@ -150,6 +157,9 @@ type Stripe struct {
 	// already-known Stripe customer id, which skips the search-then-create
 	// dance entirely.
 	CustomerMetadataKey string
+	// LivemodeMetadataKey holds "true"/"false" so settlement picks the live
+	// or sandbox platform API key. Defaults to stripe_livemode.
+	LivemodeMetadataKey string
 	// StatementDescriptorSuffix is applied to Connect charges when set.
 	StatementDescriptorSuffix string
 	// CollectionMethod is "charge_automatically" (charge the saved payment
@@ -222,15 +232,16 @@ type Admin struct {
 func LoadProducer() (Producer, error) {
 	var errs []error
 	p := Producer{
-		Addr:                    env("SETTLEMENT_HTTP_ADDR", ":8080"),
-		ShutdownTimeout:         envDuration("SETTLEMENT_SHUTDOWN_TIMEOUT", 15*time.Second, &errs),
-		MaxBodyBytes:            int64(envInt("SETTLEMENT_MAX_BODY_BYTES", 1<<20, &errs)),
-		StripeWebhookSecrets:    envList("SETTLEMENT_STRIPE_WEBHOOK_SECRETS"),
-		StripeToleranceSeconds:  int64(envInt("SETTLEMENT_STRIPE_TOLERANCE_SECONDS", 300, &errs)),
-		OpenMeterWebhookSecrets: envList("SETTLEMENT_OPENMETER_WEBHOOK_SECRETS"),
-		OpenMeterToleranceSecs:  int64(envInt("SETTLEMENT_OPENMETER_TOLERANCE_SECONDS", 300, &errs)),
-		CollectRequestSecrets:   envList("SETTLEMENT_COLLECT_REQUEST_SECRETS"),
-		Kafka:                   loadKafka(&errs),
+		Addr:                        env("SETTLEMENT_HTTP_ADDR", ":8080"),
+		ShutdownTimeout:             envDuration("SETTLEMENT_SHUTDOWN_TIMEOUT", 15*time.Second, &errs),
+		MaxBodyBytes:                int64(envInt("SETTLEMENT_MAX_BODY_BYTES", 1<<20, &errs)),
+		StripeWebhookSecrets:        envList("SETTLEMENT_STRIPE_WEBHOOK_SECRETS"),
+		StripeSandboxWebhookSecrets: envList("SETTLEMENT_STRIPE_SANDBOX_WEBHOOK_SECRETS"),
+		StripeToleranceSeconds:      int64(envInt("SETTLEMENT_STRIPE_TOLERANCE_SECONDS", 300, &errs)),
+		OpenMeterWebhookSecrets:     envList("SETTLEMENT_OPENMETER_WEBHOOK_SECRETS"),
+		OpenMeterToleranceSecs:      int64(envInt("SETTLEMENT_OPENMETER_TOLERANCE_SECONDS", 300, &errs)),
+		CollectRequestSecrets:       envList("SETTLEMENT_COLLECT_REQUEST_SECRETS"),
+		Kafka:                       loadKafka(&errs),
 	}
 
 	if len(p.StripeWebhookSecrets) == 0 && len(p.OpenMeterWebhookSecrets) == 0 {
@@ -274,6 +285,7 @@ func LoadWorker() (Worker, error) {
 		Stripe: Stripe{
 			APIBase:                   strings.TrimRight(env("SETTLEMENT_STRIPE_API_BASE", "https://api.stripe.com"), "/"),
 			SecretKey:                 env("SETTLEMENT_STRIPE_SECRET_KEY", ""),
+			SandboxSecretKey:          env("SETTLEMENT_STRIPE_SANDBOX_SECRET_KEY", ""),
 			APIVersion:                env("SETTLEMENT_STRIPE_API_VERSION", ""),
 			Timeout:                   envDuration("SETTLEMENT_STRIPE_TIMEOUT", 30*time.Second, &errs),
 			MaxRetries:                envInt("SETTLEMENT_STRIPE_MAX_RETRIES", 3, &errs),
@@ -283,6 +295,7 @@ func LoadWorker() (Worker, error) {
 			ConnectAccountMetadataKey: env("SETTLEMENT_CONNECT_ACCOUNT_METADATA_KEY", "stripe_connect_account_id"),
 			ChargeModelMetadataKey:    env("SETTLEMENT_CHARGE_MODEL_METADATA_KEY", "stripe_charge_model"),
 			CustomerMetadataKey:       env("SETTLEMENT_STRIPE_CUSTOMER_METADATA_KEY", "stripe_customer_id"),
+			LivemodeMetadataKey:       env("SETTLEMENT_LIVEMODE_METADATA_KEY", "stripe_livemode"),
 			StatementDescriptorSuffix: env("SETTLEMENT_STRIPE_STATEMENT_DESCRIPTOR_SUFFIX", ""),
 			CollectionMethod:          env("SETTLEMENT_STRIPE_COLLECTION_METHOD", "charge_automatically"),
 			AutoAdvance:               envBool("SETTLEMENT_STRIPE_AUTO_ADVANCE", true, &errs),

@@ -24,7 +24,8 @@ import (
 )
 
 const (
-	testStripeSecret = "whsec_producer_test"
+	testStripeSecret        = "whsec_producer_test"
+	testStripeSandboxSecret = "whsec_producer_sandbox_test"
 	// Synthetic fixture only — not a real webhook secret.
 	testStandardSecret = "whsec_c2V0dGxlbWVudC10ZXN0LWhtYWMta2V5LXYx"
 	testCollectSecret  = "collect_producer_test_secret"
@@ -67,12 +68,13 @@ func newTestServer(t *testing.T, publisher Publisher) http.Handler {
 	t.Helper()
 
 	cfg := config.Producer{
-		MaxBodyBytes:            1 << 20,
-		StripeWebhookSecrets:    []string{testStripeSecret},
-		StripeToleranceSeconds:  300,
-		OpenMeterWebhookSecrets: []string{testStandardSecret},
-		OpenMeterToleranceSecs:  300,
-		CollectRequestSecrets:   []string{testCollectSecret},
+		MaxBodyBytes:                1 << 20,
+		StripeWebhookSecrets:        []string{testStripeSecret},
+		StripeSandboxWebhookSecrets: []string{testStripeSandboxSecret},
+		StripeToleranceSeconds:      300,
+		OpenMeterWebhookSecrets:     []string{testStandardSecret},
+		OpenMeterToleranceSecs:      300,
+		CollectRequestSecrets:       []string{testCollectSecret},
 		Kafka: config.Kafka{
 			TopicStripe:         "billing.stripe.events.v1",
 			TopicOpenMeter:      "billing.openmeter.invoices.v1",
@@ -84,13 +86,21 @@ func newTestServer(t *testing.T, publisher Publisher) http.Handler {
 }
 
 func stripeRequest(t *testing.T, body string) *http.Request {
+	return signedStripeRequest(t, "/webhooks/stripe", testStripeSecret, body)
+}
+
+func stripeSandboxRequest(t *testing.T, body string) *http.Request {
+	return signedStripeRequest(t, "/webhooks/stripe/sandbox", testStripeSandboxSecret, body)
+}
+
+func signedStripeRequest(t *testing.T, path, secret, body string) *http.Request {
 	t.Helper()
 
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
-	mac := hmac.New(sha256.New, []byte(testStripeSecret))
+	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(ts + "." + body))
 
-	req := httptest.NewRequest(http.MethodPost, "/webhooks/stripe", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	req.Header.Set("Stripe-Signature", "t="+ts+",v1="+hex.EncodeToString(mac.Sum(nil)))
 	return req
 }
@@ -389,7 +399,7 @@ func TestPublishFailureReturns500SoTheProviderRetries(t *testing.T) {
 	server := newTestServer(t, publisher)
 
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, stripeRequest(t, `{"id":"evt_1","type":"invoice.paid","data":{"object":{"id":"in_1"}}}`))
+	server.ServeHTTP(rec, stripeRequest(t, `{"id":"evt_1","type":"invoice.paid","livemode":true,"data":{"object":{"id":"in_1"}}}`))
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 so the event is redelivered", rec.Code)
@@ -450,6 +460,67 @@ func TestUnconfiguredEndpointRefusesTraffic(t *testing.T) {
 	server.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("readyz = %d, want 503 with no secrets configured", rec.Code)
+	}
+}
+
+func TestSandboxWebhookPublishesTestModeEvents(t *testing.T) {
+	publisher := &recordingPublisher{}
+	server := newTestServer(t, publisher)
+
+	body := `{"id":"evt_sb","type":"invoice.paid","livemode":false,"data":{"object":{"id":"in_1"}}}`
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, stripeSandboxRequest(t, body))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	msg := publisher.only(t)
+	if string(msg.Value) != body {
+		t.Errorf("published body was modified")
+	}
+	headers := map[string]string{}
+	for _, h := range msg.Headers {
+		headers[h.Key] = string(h.Value)
+	}
+	if headers[events.HeaderLivemode] != "false" {
+		t.Errorf("livemode header = %q, want false", headers[events.HeaderLivemode])
+	}
+}
+
+func TestStripeEndpointsRejectLivemodeMismatch(t *testing.T) {
+	cases := []struct {
+		name  string
+		build func(t *testing.T) *http.Request
+	}{
+		{
+			name: "live endpoint rejects test-mode event",
+			build: func(t *testing.T) *http.Request {
+				return stripeRequest(t, `{"id":"evt_1","type":"invoice.paid","livemode":false,"data":{"object":{"id":"in_1"}}}`)
+			},
+		},
+		{
+			name: "sandbox endpoint rejects live event",
+			build: func(t *testing.T) *http.Request {
+				return stripeSandboxRequest(t, `{"id":"evt_1","type":"invoice.paid","livemode":true,"data":{"object":{"id":"in_1"}}}`)
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			publisher := &recordingPublisher{}
+			server := newTestServer(t, publisher)
+
+			rec := httptest.NewRecorder()
+			server.ServeHTTP(rec, tc.build(t))
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", rec.Code)
+			}
+			if publisher.count() != 0 {
+				t.Error("a livemode-mismatched event reached the billing topic")
+			}
+		})
 	}
 }
 

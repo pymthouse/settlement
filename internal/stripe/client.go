@@ -236,13 +236,29 @@ type InvoiceItem struct {
 	Metadata    map[string]string `json:"metadata"`
 }
 
-// RequestOptions carry the per-call Connect account and idempotency key.
+// RequestOptions carry the per-call Connect account, idempotency key, and
+// which platform secret to use (live vs sandbox).
 type RequestOptions struct {
 	// Account sets `Stripe-Account`. Empty means the platform account.
 	Account string
 	// IdempotencyKey makes a retried create a no-op. Stripe remembers keys for
 	// 24 hours; anything older is recovered by lookup instead.
 	IdempotencyKey string
+	// Livemode selects the platform API key. nil or true → SecretKey (live);
+	// false → SandboxSecretKey. Never falls back across modes on 404.
+	Livemode *bool
+}
+
+// SecretFor resolves the platform secret for a request. Returns an error when
+// sandbox mode is requested but SETTLEMENT_STRIPE_SANDBOX_SECRET_KEY is unset.
+func (c *Client) SecretFor(opts RequestOptions) (string, error) {
+	if opts.Livemode != nil && !*opts.Livemode {
+		if c.cfg.SandboxSecretKey == "" {
+			return "", errors.New("SETTLEMENT_STRIPE_SANDBOX_SECRET_KEY is required for livemode=false invoices")
+		}
+		return c.cfg.SandboxSecretKey, nil
+	}
+	return c.cfg.SecretKey, nil
 }
 
 // CreateCustomer creates a customer, optionally on a connected account.
@@ -498,7 +514,11 @@ func (c *Client) attempt(ctx context.Context, operation, method, path string, fo
 	if err != nil {
 		return fmt.Errorf("stripe %s: build request: %w", operation, err)
 	}
-	req.SetBasicAuth(c.cfg.SecretKey, "")
+	secret, err := c.SecretFor(opts)
+	if err != nil {
+		return fmt.Errorf("stripe %s: %w", operation, err)
+	}
+	req.SetBasicAuth(secret, "")
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")

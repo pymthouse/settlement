@@ -61,6 +61,8 @@ type target struct {
 	Model config.ChargeModel
 	// Account is the Connect account id, empty in platform mode.
 	Account string
+	// Livemode selects the live vs sandbox platform API key.
+	Livemode bool
 }
 
 // requestOptions turns a target into the Stripe request headers.
@@ -70,7 +72,11 @@ type target struct {
 // Destination and platform charges are made on the platform account, and the
 // routing is expressed in the invoice body instead.
 func (t target) requestOptions(idempotencyKey string) stripe.RequestOptions {
-	opts := stripe.RequestOptions{IdempotencyKey: idempotencyKey}
+	livemode := t.Livemode
+	opts := stripe.RequestOptions{
+		IdempotencyKey: idempotencyKey,
+		Livemode:       &livemode,
+	}
 	if t.Model == config.ChargeModelDirect {
 		opts.Account = t.Account
 	}
@@ -86,6 +92,7 @@ func (t target) requestOptions(idempotencyKey string) stripe.RequestOptions {
 func (s *Settler) resolveTarget(ctx context.Context, inv *openmeter.Invoice) (target, error) {
 	model := s.cfg.DefaultChargeModel
 	account := ""
+	livemode := true
 
 	metadata, err := s.customerMetadata(ctx, inv)
 	if err != nil {
@@ -104,6 +111,7 @@ func (s *Settler) resolveTarget(ctx context.Context, inv *openmeter.Invoice) (ta
 	if v := inv.Metadata.Get(s.cfg.ChargeModelMetadataKey); v != "" {
 		model = config.ChargeModel(strings.ToLower(v))
 	}
+	livemode = parseLivemodeMetadata(metadata, inv.Metadata, s.cfg.LivemodeMetadataKey)
 
 	if !config.ValidChargeModel(model) {
 		return target{}, faults.Permanentf("invalid_charge_model",
@@ -121,8 +129,37 @@ func (s *Settler) resolveTarget(ctx context.Context, inv *openmeter.Invoice) (ta
 		return target{}, faults.Permanentf("invalid_connect_account",
 			"invoice %s: %q is not a Stripe Connect account id", inv.ID, account)
 	}
+	if !livemode && s.cfg.SandboxSecretKey == "" {
+		return target{}, faults.Permanentf("missing_sandbox_secret",
+			"invoice %s: stripe_livemode=false but SETTLEMENT_STRIPE_SANDBOX_SECRET_KEY is not configured",
+			inv.ID)
+	}
 
-	return target{Model: model, Account: account}, nil
+	return target{Model: model, Account: account, Livemode: livemode}, nil
+}
+
+// invoiceLivemode is the OpenMeter invoice's intended Stripe mode. Customer
+// metadata is the default; invoice metadata wins, matching resolveTarget.
+func (s *Settler) invoiceLivemode(ctx context.Context, inv *openmeter.Invoice) (bool, error) {
+	metadata, err := s.customerMetadata(ctx, inv)
+	if err != nil {
+		return true, err
+	}
+	return parseLivemodeMetadata(metadata, inv.Metadata, s.cfg.LivemodeMetadataKey), nil
+}
+
+func parseLivemodeMetadata(customer, invoice openmeter.Metadata, key string) bool {
+	livemode := true
+	if key == "" {
+		key = "stripe_livemode"
+	}
+	if v := customer.Get(key); v != "" {
+		livemode = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := invoice.Get(key); v != "" {
+		livemode = strings.EqualFold(v, "true") || v == "1"
+	}
+	return livemode
 }
 
 // customerMetadata reads the OpenMeter customer's metadata, cached briefly.
